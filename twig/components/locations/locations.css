@@ -1,0 +1,30 @@
+.locations-overview {
+  .tabs {
+    &__items {
+      justify-content: left;
+    }
+
+    &__item {
+      margin-right: 30px;
+    }
+
+    & .content-wrapper {
+      background-color: var(--lighter-grey);
+    }
+
+    &__content {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      padding: var(--space-300) var(--space-100);
+
+      @media (--mobile-down) {
+        display: block;
+      }
+
+      &[hidden] {
+        display: none;
+      }
+    }
+  }
+}

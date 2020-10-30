@@ -1,0 +1,66 @@
+<div class="location">
+  <div class="location__content">
+    <h2 class="h3">{{ location.title }}</h2>
+
+    {% if location.addressOverride.processed and ( location.addressOverride.processed | striptags | raw is not empty ) %}
+      <div class="location__detail address">
+        <strong class="location-label">{% trans 'Address' with {'context': 'Storybook frontend'} %}</strong>
+        <address class="content">
+          {{ location.addressOverride.processed | striptags | nl2br | replace({'<br />\n<br />': '<br />'}) | raw }}
+        </address>
+      </div>
+    {% elseif location.address and location.address is not empty %}
+      <div class="location__detail address">
+        <strong class="location-label">{% trans 'Address' with {'context': 'Storybook frontend'} %}</strong>
+        <address class="content">
+          {% if location.address.organization is not empty %}
+            {{ location.address.organization }}<br>
+          {% endif %}
+          {% if location.address.givenName is not empty %}
+            {{ location.address.givenName }} {{ location.address.familyName }}<br>
+          {% endif %}
+          {% if location.address.addressLine1 is not empty %}
+            {{ location.address.addressLine1 }}<br>
+          {% endif %}
+          {% if location.address.addressLine2 is not empty %}
+            {{ location.address.addressLine2 }}<br>
+          {% endif %}
+          {% if location.address.postalCode is not empty %}
+            {{ location.address.postalCode }} {{ location.address.locality }}<br>
+          {% endif %}
+          {% if location.address.country is not empty %}
+            {{ location.address.country }}
+          {% endif %}
+        </address>
+      </div>
+    {% endif %}
+
+    {% if location.phone %}
+      <div class="location__detail">
+        <strong class="location-label">{% trans 'Phone' with {'context': 'Storybook frontend'} %}</strong>
+        <p class="content">{{ location.phone }}</p>
+      </div>
+    {% endif %}
+
+    {% if location.fax %}
+      <div class="location__detail">
+        <strong class="location-label">{% trans 'Fax' with {'context': 'Storybook frontend'} %}</strong>
+        <p class="content">{{ location.fax }}</p>
+      </div>
+    {% endif %}
+
+    {% if location.email %}
+      <div class="location__detail">
+        <strong class="location-label">{% trans 'Email' with {'context': 'Storybook frontend'} %}</strong>
+        <p class="content"><a href="mailto:{{ location.email }}">{{ location.email }}</a></p>
+      </div>
+    {% endif %}
+
+    {% if location.website %}
+      <div class="location__detail">
+        <strong class="location-label">{% trans 'www' with {'context': 'Storybook frontend'} %}</strong>
+        <p class="content"><a href="{{ location.website }}">{{ location.website }}</a></p>
+      </div>
+    {% endif %}
+    </div>
+</div>

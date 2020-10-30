@@ -1,0 +1,44 @@
+diff --git a/src/Plugin/facets/processor/RemoveNoResultsLink.php b/src/Plugin/facets/processor/RemoveNoResultsLink.php
+new file mode 100644
+index 000000000000..2f29d7d4efcd
+--- /dev/null
++++ b/src/Plugin/facets/processor/RemoveNoResultsLink.php
+@@ -0,0 +1,38 @@
++<?php
++
++namespace Drupal\facets\Plugin\facets\processor;
++
++use Drupal\facets\FacetInterface;
++use Drupal\facets\Processor\BuildProcessorInterface;
++use Drupal\facets\Processor\ProcessorPluginBase;
++use Drupal\facets\Result\Result;
++
++/**
++ * Provides a processor that displays the Facet item but removes the link if the result count is 0.
++ *
++ * @FacetsProcessor(
++ *   id = "remove_no_results_link",
++ *   label = @Translation("Remove no results Facet item link."),
++ *   description = @Translation("Display the Facet item but remove the link if the result count is 0. Useful when minimum count is set to 0."),
++ *   stages = {
++ *     "build" = 25
++ *   }
++ * )
++ */
++class RemoveNoResultsLink extends ProcessorPluginBase implements BuildProcessorInterface {
++
++  /**
++   * {@inheritdoc}
++   */
++  public function build(FacetInterface $facet, array $results) {
++    /** @var \Drupal\facets\Result\ResultInterface $result */
++    foreach ($results as $id => &$result) {
++      if ($result->getCount() === 0) {
++        $unlinkedResult = new Result($facet, $result->getRawValue(), $result->getDisplayValue(), $result->getCount());
++        $result = $unlinkedResult;
++      }
++    }
++    return $results;
++  }
++
++}

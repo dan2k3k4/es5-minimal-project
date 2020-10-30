@@ -1,0 +1,13 @@
+diff --git a/css/paragraphs.admin.css b/css/paragraphs.admin.css
+index 58971cc..5c35a18 100644
+--- a/css/paragraphs.admin.css
++++ b/css/paragraphs.admin.css
+@@ -68,7 +68,7 @@
+   background: linear-gradient(to right, rgba(255, 255, 221, 0) 0%, #ffd 100%);
+ }
+ .js .paragraph-type-title {
+-  flex-basis: 25%;
++  flex-basis: auto;
+   min-width: 80px;
+
+   white-space: nowrap;

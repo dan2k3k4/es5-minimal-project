@@ -1,0 +1,8 @@
+query {
+  partner: locations(type: "partner") {
+     ...Location
+  }
+  regionalOffice: locations(type: "regional") {
+     ...Location
+  }
+}

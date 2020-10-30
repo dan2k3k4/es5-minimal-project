@@ -1,0 +1,22 @@
+fragment Location on TaxonomyTermLocations {
+  title: entityLabel
+  address: fieldLocationsAddress {
+    organization
+    givenName
+    familyName
+    addressLine1
+    addressLine2
+    postalCode
+    locality
+    dependentLocality
+    administrativeArea
+    country
+  }
+  addressOverride: fieldLocationsAddressOverride {
+    processed
+  }
+  phone: fieldLocationsPhone
+  fax: fieldLocationsFax
+  website: fieldLocationsWebsite
+  email: fieldLocationsEmail
+}

@@ -1,0 +1,105 @@
+diff --git a/formdazzle.module b/formdazzle.module
+index f4b17ee..a7cb33c 100644
+--- a/formdazzle.module
++++ b/formdazzle.module
+@@ -18,7 +18,7 @@ function formdazzle_form_alter(&$form, FormStateInterface $form_state, $form_id)
+ /**
+  * A recursive helper function to add theme suggestions to form elements.
+  *
+- * @param Element $element
++ * @param \Drupal\Core\Render\Element $element
+  * @param string $form_id
+  * @param string $tree
+  */
+@@ -35,12 +35,18 @@ function formdazzle_add_form_element_suggestions(&$element, $form_id, $tree = ''
+   // #theme can be a string or an array. To ease processing, we ensure it is an
+   // array and flatten single-item arrays before we leave this function.
+   if (isset($element['#theme']) && !is_array($element['#theme'])) {
+-    $element['#theme'] = [ $element['#theme'] ];
++    $element['#theme'] = [$element['#theme']];
+   }
+   if (isset($defaultInfo['#theme_wrappers'])) {
+-    $element['#theme_wrappers'] = isset($element['#theme_wrappers'])
+-      ? array_unique(array_merge($element['#theme_wrappers'], $defaultInfo['#theme_wrappers']))
+-      : $defaultInfo['#theme_wrappers'];
++    // Some times $element['#theme_wrappers'] contains nested tables
++    // e.g. webform with custom css styles
++    // remove to avoid notice for array to string conversion
++    unset($element['#theme_wrappers']['container']);
++    if (isset($element['#theme_wrappers']) && is_array($element['#theme_wrappers']) ) {
++      $element['#theme_wrappers'] = array_unique(array_merge($element['#theme_wrappers'], $defaultInfo['#theme_wrappers']));
++    } else {
++      $element['#theme_wrappers'] = $defaultInfo['#theme_wrappers'];
++    }
+   }
+ 
+   // Find the form element name.
+@@ -74,6 +80,7 @@ function formdazzle_add_form_element_suggestions(&$element, $form_id, $tree = ''
+       case 'password_confirm':
+         $type = $element['#type'];
+         break;
++
+       case 'system_compact_link':
+         $type = 'compact_link';
+         break;
+@@ -81,23 +88,23 @@ function formdazzle_add_form_element_suggestions(&$element, $form_id, $tree = ''
+   }
+ 
+   // Use the same theme suggestions for each theme hook.
+-  $suggestion_suffix =  ($type ? '__' . $type : '') . '__' . $form_id . ($name ? '__' . $name : '');
++  $suggestion_suffix = ($type ? '__' . $type : '') . '__' . $form_id . ($name ? '__' . $name : '');
+ 
+   // We want to ensure that all form elements have a generic theme suggestion.
+   // Sometimes, form elements already have them. And sometimes, we have figured
+   // out ones to add above. If we don't have a generic theme suggestion, add
+   // suggestion data so that later hooks can add suggestions to the form.
+-  $add_data = true;
++  $add_data = TRUE;
+   if ($name || $type) {
+-    $add_data = false;
++    $add_data = FALSE;
+   }
+   if ($add_data) {
+-    $has_good_theme_suggestion = isset($element['#theme']) && (
++    $has_good_theme_suggestion = isset($element['#theme'], $element['#theme'][0]) && (
+       isset($element['#type']) && $element['#theme'][0] === $element['#type']
+       || strpos($element['#theme'][0], '__')
+     );
+     $has_good_theme_wrappers_suggestion = $has_good_theme_suggestion
+-      || isset($element['#theme_wrappers'])
++      || isset($element['#theme_wrappers'], $element['#theme_wrappers'][0])
+       && strpos($element['#theme_wrappers'][0], '__');
+     if ($has_good_theme_suggestion || $has_good_theme_wrappers_suggestion) {
+       $add_data = FALSE;
+@@ -115,7 +122,7 @@ function formdazzle_add_form_element_suggestions(&$element, $form_id, $tree = ''
+   }
+ 
+   // Add a theme suggestion to #theme.
+-  if (isset($element['#theme'])) {
++  if (isset($element['#theme'], $element['#theme'][0])) {
+     // If we aren't examining the root form, add #theme suggestions.
+     if ($element['#theme'][0] !== $form_id && $element['#theme'][0] !== 'webform_submission_form') {
+       foreach ($element['#theme'] as $key => $value) {
+@@ -131,18 +138,19 @@ function formdazzle_add_form_element_suggestions(&$element, $form_id, $tree = ''
+   // Add a theme suggestion to #theme_wrappers.
+   if (isset($element['#theme_wrappers'])) {
+     foreach ($element['#theme_wrappers'] as $key => $value) {
+-      if ($value !== 'form') {
++      if (!is_array($value) && $value !== 'form') {
+         $element['#theme_wrappers'][$key] = $value . $suggestion_suffix;
+       }
+     }
+   }
+ 
+   // Recursively add suggestions to the element's children.
+-  foreach(Element::children($element) as $key) {
++  foreach (Element::children($element) as $key) {
+     $child_tree = '';
+     if ($tree) {
+       $child_tree = $tree . '_' . $key;
+-    } elseif (isset($element[$key]['#tree'])) {
++    }
++    elseif (isset($element[$key]['#tree'])) {
+       $child_tree = $key;
+     }
+     formdazzle_add_form_element_suggestions($element[$key], $form_id, $child_tree);

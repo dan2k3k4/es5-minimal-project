@@ -1,0 +1,1422 @@
+diff --git a/sources/content/src/ContentEntitySourcePluginUi.php b/sources/content/src/ContentEntitySourcePluginUi.php
+index 28a4101c08cf..05f6618dbe82 100644
+--- a/sources/content/src/ContentEntitySourcePluginUi.php
++++ b/sources/content/src/ContentEntitySourcePluginUi.php
+@@ -3,9 +3,13 @@
+ namespace Drupal\tmgmt_content;
+ 
+ use Drupal\Core\Database\Query\Condition;
++use Drupal\content_translation\ContentTranslationManager;
+ use Drupal\Core\Entity\ContentEntityInterface;
++use Drupal\Core\Entity\EntityPublishedInterface;
+ use Drupal\Core\Form\FormStateInterface;
++use Drupal\tmgmt\JobItemInterface;
+ use Drupal\tmgmt\SourcePluginUiBase;
++use Drupal\tmgmt_content\Plugin\tmgmt\Source\ContentEntitySource;
+ 
+ /**
+  * Content entity source plugin UI.
+@@ -131,10 +135,13 @@ class ContentEntitySourcePluginUi extends SourcePluginUiBase {
+    * @return array
+    */
+   public function overviewRow(ContentEntityInterface $entity, array $bundles) {
+-    $label = $entity->label() ?: $this->t('@type: @id', array(
+-      '@type' => $entity->getEntityTypeId(),
+-      '@id' => $entity->id(),
+-    ));
++    $entity_label = $entity->label();
++
++    $storage = \Drupal::entityTypeManager()->getStorage($entity->getEntityTypeId());
++    $use_latest_revisions = $entity->getEntityType()->isRevisionable() && ContentTranslationManager::isPendingRevisionSupportEnabled($entity->getEntityTypeId(), $entity->bundle());
++
++    // Get the default revision.
++    $default_revision = $use_latest_revisions ? $storage->load($entity->id()) : $entity;
+ 
+     // Get existing translations and current job items for the entity
+     // to determine translation statuses
+@@ -144,7 +151,6 @@ class ContentEntitySourcePluginUi extends SourcePluginUiBase {
+ 
+     $row = array(
+       'id' => $entity->id(),
+-      'title' => $entity->hasLinkTemplate('canonical') ? $entity->toLink($label, 'canonical')->toString() : ($entity->label() ?: $entity->id()),
+     );
+ 
+     if (count($bundles) > 1) {
+@@ -154,6 +160,29 @@ class ContentEntitySourcePluginUi extends SourcePluginUiBase {
+     // Load entity translation specific data.
+     $manager = \Drupal::service('content_translation.manager');
+     foreach (\Drupal::languageManager()->getLanguages() as $langcode => $language) {
++      // @see Drupal\content_translation\Controller\ContentTranslationController::overview()
++      // If the entity type is revisionable, we may have pending revisions
++      // with translations not available yet in the default revision. Thus we
++      // need to load the latest translation-affecting revision for each
++      // language to be sure we are listing all available translations.
++      if ($use_latest_revisions) {
++        $entity = $default_revision;
++        $latest_revision_id = $storage->getLatestTranslationAffectedRevisionId($entity->id(), $langcode);
++        if ($latest_revision_id) {
++          /** @var \Drupal\Core\Entity\ContentEntityInterface $latest_revision */
++          $latest_revision = $storage->loadRevision($latest_revision_id);
++          // Make sure we do not list removed translations, i.e. translations
++          // that have been part of a default revision but no longer are.
++          if (!$latest_revision->wasDefaultRevision() || $default_revision->hasTranslation($langcode)) {
++            $entity = $latest_revision;
++            // Update the label if we are dealing with the source language.
++            if ($langcode === $source_lang) {
++              $entity_label = $entity->label();
++            }
++          }
++        }
++        $translations = $entity->getTranslationLanguages();
++      }
+ 
+       $translation_status = 'current';
+ 
+@@ -185,6 +214,12 @@ class ContentEntitySourcePluginUi extends SourcePluginUiBase {
+         'class' => array('langstatus-' . $langcode),
+       ];
+     }
++
++    $label = $entity_label ?: $this->t('@type: @id', [
++      '@type' => $entity->getEntityTypeId(),
++      '@id' => $entity->id(),
++    ]);
++    $row['title'] = $entity->hasLinkTemplate('canonical') ? $entity->toLink($label, 'canonical')->toString() : ($entity_label ?: $entity->id());
+     return $row;
+   }
+ 
+@@ -260,7 +295,7 @@ class ContentEntitySourcePluginUi extends SourcePluginUiBase {
+       batch_set($batch);
+     }
+     else {
+-      $entities = \Drupal::entityTypeManager()->getStorage($item_type)->loadMultiple(array_filter($form_state->getValue('items')));
++      $entities = ContentEntitySource::loadMultiple($item_type, array_filter($form_state->getValue('items')));
+       $job_items = 0;
+       // Loop through entities and add them to continuous jobs.
+       foreach ($entities as $entity) {
+@@ -391,7 +426,10 @@ class ContentEntitySourcePluginUi extends SourcePluginUiBase {
+     $query->addField('e', $id_key);
+ 
+     $langcode_table_alias = 'e';
+-    if ($data_table = $entity_type->getDataTable()) {
++    // @todo: Discuss if search should work on latest, default or all revisions.
++    //   See https://www.drupal.org/project/tmgmt/issues/2984554.
++    $data_table = $entity_type->isRevisionable() ? $entity_type->getRevisionDataTable() : $entity_type->getDataTable();
++    if ($data_table) {
+       $langcode_table_alias = $query->innerJoin($data_table, 'data_table', '%alias.' . $id_key . ' = e.' . $id_key . ' AND %alias.default_langcode = 1');
+     }
+ 
+@@ -512,4 +550,151 @@ class ContentEntitySourcePluginUi extends SourcePluginUiBase {
+     }
+   }
+ 
++  /**
++   * {@inheritdoc}
++   */
++  public function reviewForm(array $form, FormStateInterface $form_state, JobItemInterface $item) {
++    $form = parent::reviewForm($form, $form_state, $item);
++
++    // Only proceed to display the content moderation form if the job item is
++    // either active or reviewable.
++    if (!$item->isNeedsReview() && !$item->isActive()) {
++      return $form;
++    }
++
++    /** @var \Drupal\Core\Entity\ContentEntityInterface $entity */
++    $entity = ContentEntitySource::load($item->getItemType(), $item->getItemId());
++
++    if (!$form_state->isRebuilding() && $entity) {
++      // In case the original entity is moderated, allow users to update the
++      // content moderation state of the translation.
++      if (ContentEntitySource::isModeratedEntity($entity)) {
++        $form['moderation_state'] = $this->buildContentModerationElement($item, $entity);
++      }
++      // For non-moderated publishable entities, build a publish state form.
++      elseif ($entity instanceof EntityPublishedInterface) {
++        $form['status'] = $this->buildPublishStateElement($item, $entity);
++      }
++    }
++
++    return $form;
++  }
++
++  /**
++   * {@inheritdoc}
++   */
++  public function reviewFormSubmit(array $form, FormStateInterface $form_state, JobItemInterface $item) {
++    // At this point, we don't need to check whether an entity is moderated or
++    // publishable. Instead, we look for a specific key that may be set.
++    if ($form_state->hasValue(['moderation_state', 'new_state'])) {
++      // We are using a special #moderation_state key to carry the information
++      // about the new moderation state value.
++      // See \Drupal\tmgmt_content\Plugin\tmgmt\Source\ContentEntitySource::doSaveTranslations()
++      $moderation_state = (array) $form_state->getValue(['moderation_state', 'new_state']);
++      $item->updateData(['#moderation_state'], $moderation_state, TRUE);
++    }
++    elseif ($form_state->hasValue(['status', 'published'])) {
++      $published = (array) (bool) $form_state->getValue(['status', 'published']);
++      $item->updateData(['#published'], $published, TRUE);
++    }
++
++    parent::reviewFormSubmit($form, $form_state, $item);
++  }
++
++  /**
++   * Build a publish state element.
++   *
++   * @param \Drupal\tmgmt\JobItemInterface $item
++   *   The job item.
++   * @param \Drupal\Core\Entity\EntityPublishedInterface $entity
++   *   The source publishable entity.
++   *
++   * @return array
++   *   A publish state form element.
++   */
++  protected function buildPublishStateElement(JobItemInterface $item, EntityPublishedInterface $entity) {
++    $element = [
++      '#type' => 'fieldset',
++      '#title' => $this->t('Translation publish status'),
++      '#tree' => TRUE,
++    ];
++    $published = $item->getData(['#published'], 0);
++    $default_value = isset($published[0]) ? $published[0] : $entity->isPublished();
++    $element['published'] = [
++      '#type' => 'checkbox',
++      '#default_value' => $default_value,
++      '#title' => $this->t('Published'),
++    ];
++
++    return $element;
++  }
++
++  /**
++   * Build a content moderation elemenet for the translation.
++   *
++   * @param \Drupal\tmgmt\JobItemInterface $item
++   *   The job item.
++   * @param \Drupal\Core\Entity\ContentEntityInterface $entity
++   *   The source moderated entity.
++   *
++   * @return array
++   *   A content moderation form element.
++   */
++  protected function buildContentModerationElement(JobItemInterface $item, ContentEntityInterface $entity) {
++    $element = [];
++
++    /** @var \Drupal\content_moderation\ModerationInformationInterface $moderation_info */
++    $moderation_info = \Drupal::service('content_moderation.moderation_information');
++    $workflow = $moderation_info->getWorkflowForEntity($entity);
++    $moderation_validator = \Drupal::service('content_moderation.state_transition_validation');
++
++    // Extract the current moderation state stored within the special key.
++    $moderation_state = $item->getData(['#moderation_state'], 0);
++    $current_state = isset($moderation_state[0]) ? $moderation_state[0] : $entity->get('moderation_state')->value;
++    $default = $workflow->getTypePlugin()->getState($current_state);
++
++    // Get a list of valid transitions.
++    /** @var \Drupal\workflows\Transition[] $transitions */
++    $transitions = $moderation_validator->getValidTransitions($entity, \Drupal::currentUser());
++
++    $transition_labels = [];
++    $default_value = NULL;
++    foreach ($transitions as $transition) {
++      $transition_to_state = $transition->to();
++      $transition_labels[$transition_to_state->id()] = $transition_to_state->label();
++      if ($default->id() === $transition_to_state->id()) {
++        $default_value = $default->id();
++      }
++    }
++
++    // See \Drupal\content_moderation\Plugin\Field\FieldWidget\ModerationStateWidget::formElement()
++    $element += [
++      '#type' => 'container',
++      '#tree' => TRUE,
++      'current' => [
++        '#type' => 'item',
++        '#title' => $this->t('Current source state'),
++        '#markup' => $default->label(),
++        '#wrapper_attributes' => [
++          'class' => ['container-inline'],
++        ],
++      ],
++      'new_state' => [
++        '#type' => 'select',
++        '#title' => $this->t('Translation state'),
++        '#options' => $transition_labels,
++        '#default_value' => $default_value,
++        '#access' => !empty($transition_labels),
++        '#wrapper_attributes' => [
++          'class' => ['container-inline'],
++        ],
++      ],
++    ];
++
++    $element['#theme'] = ['entity_moderation_form'];
++    $element['#attached']['library'][] = 'content_moderation/content_moderation';
++
++    return $element;
++  }
++
+ }
+diff --git a/sources/content/src/Controller/ContentTranslationPreviewController.php b/sources/content/src/Controller/ContentTranslationPreviewController.php
+index 145569f11c3c..6edcf239969f 100644
+--- a/sources/content/src/Controller/ContentTranslationPreviewController.php
++++ b/sources/content/src/Controller/ContentTranslationPreviewController.php
+@@ -7,6 +7,7 @@ use Drupal\Core\Entity\ContentEntityInterface;
+ use Drupal\Core\Entity\EntityTypeManagerInterface;
+ use Drupal\tmgmt\JobItemInterface;
+ use Drupal\Core\Render\Element;
++use Drupal\tmgmt_content\Plugin\tmgmt\Source\ContentEntitySource;
+ use Symfony\Component\DependencyInjection\ContainerInterface;
+ use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
+ 
+@@ -54,9 +55,7 @@ class ContentTranslationPreviewController extends ControllerBase {
+    */
+   public function preview(JobItemInterface $tmgmt_job_item, $view_mode) {
+     // Load entity.
+-    $entity = $this->entityTypeManager
+-      ->getStorage($tmgmt_job_item->getItemType())
+-      ->load($tmgmt_job_item->getItemId());
++    $entity = ContentEntitySource::load($tmgmt_job_item->getItemType(), $tmgmt_job_item->getItemId(), $tmgmt_job_item->getJob()->getSourceLangcode());
+ 
+     // We cannot show the preview for non-existing entities.
+     if (!$entity) {
+@@ -66,6 +65,8 @@ class ContentTranslationPreviewController extends ControllerBase {
+     $target_langcode = $tmgmt_job_item->getJob()->getTargetLangcode();
+     // Populate preview with target translation data.
+     $preview = $this->makePreview($entity, $data, $target_langcode);
++    // Set the entity into preview mode.
++    $preview->in_preview = TRUE;
+     // Build view for entity.
+     $page = $this->entityTypeManager
+       ->getViewBuilder($entity->getEntityTypeId())
+@@ -89,10 +90,9 @@ class ContentTranslationPreviewController extends ControllerBase {
+    */
+   public function title(JobItemInterface $tmgmt_job_item) {
+     $target_language = $tmgmt_job_item->getJob()->getTargetLanguage()->getName();
+-    $title = $this->entityTypeManager
+-      ->getStorage($tmgmt_job_item->getItemType())
+-      ->load($tmgmt_job_item->getItemId())
+-      ->label();
++    $entity = ContentEntitySource::load($tmgmt_job_item->getItemType(), $tmgmt_job_item->getItemId(), $tmgmt_job_item->getJob()->getSourceLangcode());
++    $title = $entity->label();
++
+     return t("Preview of @title for @target_language", [
+       '@title' => $title,
+       '@target_language' => $target_language,
+diff --git a/sources/content/src/Plugin/tmgmt/Source/ContentEntitySource.php b/sources/content/src/Plugin/tmgmt/Source/ContentEntitySource.php
+index 663790c6a219..d937d6d2dce1 100644
+--- a/sources/content/src/Plugin/tmgmt/Source/ContentEntitySource.php
++++ b/sources/content/src/Plugin/tmgmt/Source/ContentEntitySource.php
+@@ -4,12 +4,21 @@ namespace Drupal\tmgmt_content\Plugin\tmgmt\Source;
+ 
+ use Drupal\Core\Config\Entity\ThirdPartySettingsInterface;
+ use Drupal\Core\Entity\ContentEntityInterface;
++use Drupal\Core\Entity\EntityInterface;
++use Drupal\Core\Entity\EntityPublishedInterface;
+ use Drupal\Core\Entity\EntityTypeInterface;
+ use Drupal\Core\Entity\Plugin\DataType\EntityReference;
++use Drupal\Core\Entity\RevisionLogInterface;
++use Drupal\Core\Entity\TranslatableRevisionableStorageInterface;
+ use Drupal\Core\Field\FieldDefinitionInterface;
+ use Drupal\Core\Field\FieldItemListInterface;
++use Drupal\Core\Language\LanguageInterface;
++use Drupal\Core\Plugin\Context\Context;
++use Drupal\Core\Plugin\Context\ContextDefinition;
+ use Drupal\Core\Session\AnonymousUserSession;
+ use Drupal\Core\Url;
++use Drupal\paragraphs\Entity\Paragraph;
++use Drupal\paragraphs\ParagraphInterface;
+ use Drupal\tmgmt\JobItemInterface;
+ use Drupal\tmgmt\SourcePluginBase;
+ use Drupal\tmgmt\SourcePreviewInterface;
+@@ -44,11 +53,85 @@ class ContentEntitySource extends SourcePluginBase implements SourcePreviewInter
+     return \Drupal::entityTypeManager()->getStorage($job_item->getItemType())->load($job_item->getItemId());
+   }
+ 
++  /**
++   * Loads a list of entities for the given entity type ID.
++   *
++   * By providing the language code, the latest revisions affecting the
++   * specified translation (language code) will be returned.
++   *
++   * @param string $entity_type_id
++   *   The entity type ID.
++   * @param array $entity_ids
++   *   A list of entity IDs to load.
++   * @param string|null $langcode
++   *   (optional) The language code. Defaults to source entity language.
++   *
++   * @return \Drupal\Core\Entity\EntityInterface[]
++   *   Returns a list of entities.
++   *
++   * @throws \Drupal\Component\Plugin\Exception\InvalidPluginDefinitionException
++   * @throws \Drupal\Component\Plugin\Exception\PluginNotFoundException
++   */
++  public static function loadMultiple($entity_type_id, array $entity_ids, $langcode = NULL) {
++    /** @var \Drupal\Core\Entity\EntityStorageInterface $storage */
++    $storage = \Drupal::entityTypeManager()->getStorage($entity_type_id);
++    // Load the latest revision if the entity type is revisionable.
++    if ($storage->getEntityType()->isRevisionable() && $storage instanceof TranslatableRevisionableStorageInterface) {
++      /** @var \Drupal\Core\Entity\EntityRepositoryInterface $entityRepository */
++      $entityRepository = \Drupal::service('entity.repository');
++      if (!is_null($langcode)) {
++        $dataType = 'language';
++        $contextIdPrefix = '@language.current_language_context:';
++        $contexts = [
++          $contextIdPrefix . LanguageInterface::TYPE_CONTENT => new Context(new ContextDefinition($dataType), $langcode),
++          $contextIdPrefix . LanguageInterface::TYPE_INTERFACE => new Context(new ContextDefinition($dataType), $langcode),
++        ];
++        $activeVariants = $entityRepository->getActiveMultiple($entity_type_id, $entity_ids, $contexts);
++      }
++      else {
++        $activeVariants = $entityRepository->getActiveMultiple($entity_type_id, $entity_ids);
++      }
++      foreach ($activeVariants as $variant) {
++        $entities[$variant->id()] = $variant;
++      }
++    }
++    else {
++      $entities = $storage->loadMultiple($entity_ids);
++    }
++    return $entities;
++  }
++
++  /**
++   * Loads a single entity for the given entity type ID.
++   *
++   * By providing the language code, the latest revisions affecting the
++   * specified translation (language code) will be returned.
++   *
++   * @param string $entity_type_id
++   *   The entity type ID.
++   * @param string $id
++   *   The entity ID.
++   * @param string|null $langcode
++   *   (optional) The language code. Defaults to source entity language.
++   *
++   * @return \Drupal\Core\Entity\EntityInterface|null
++   *   The loaded entity or null if not found.
++   *
++   * @throws \Drupal\Component\Plugin\Exception\InvalidPluginDefinitionException
++   * @throws \Drupal\Component\Plugin\Exception\PluginNotFoundException
++   */
++  public static function load($entity_type_id, $id, $langcode = NULL) {
++    $entities = static::loadMultiple($entity_type_id, [$id], $langcode);
++    return isset($entities[$id]) ? $entities[$id] : NULL;
++  }
++
+   /**
+    * {@inheritdoc}
+    */
+   public function getLabel(JobItemInterface $job_item) {
+-    if ($entity = $this->getEntity($job_item)) {
++    // Use the source language to a get label for the job item.
++    $langcode = $job_item->getJob() ? $job_item->getJob()->getSourceLangcode() : NULL;
++    if ($entity = static::load($job_item->getItemType(), $job_item->getItemId(), $langcode)) {
+       return $entity->label() ?: $entity->id();
+     }
+   }
+@@ -58,7 +141,8 @@ class ContentEntitySource extends SourcePluginBase implements SourcePreviewInter
+    */
+   public function getUrl(JobItemInterface $job_item) {
+     /** @var \Drupal\Core\Entity\ContentEntityInterface $entity */
+-    if ($entity = \Drupal::entityTypeManager()->getStorage($job_item->getItemType())->load($job_item->getItemId())) {
++    $langcode = $job_item->getJob() ? $job_item->getJob()->getSourceLangcode() : NULL;
++    if ($entity = static::load($job_item->getItemType(), $job_item->getItemId(), $langcode)) {
+       if ($entity->hasLinkTemplate('canonical')) {
+         $anonymous = new AnonymousUserSession();
+         $url = $entity->toUrl();
+@@ -81,8 +165,12 @@ class ContentEntitySource extends SourcePluginBase implements SourcePreviewInter
+    * Returns the data from the fields as a structure that can be processed by
+    * the Translation Management system.
+    */
+-  public function getData(JobItemInterface $job_item) {
+-    $entity = $this->getEntity($job_item);
++  public function getData(JobItemInterface $job_item, $translationLanguageId = NULL) {
++    $currentLanguageId = $translationLanguageId;
++    if (is_null($currentLanguageId)) {
++      $currentLanguageId = $job_item->getJob()->getSourceLangcode();
++    }
++    $entity = static::load($job_item->getItemType(), $job_item->getItemId(), $currentLanguageId);
+     if (!$entity) {
+       throw new TMGMTException(t('Unable to load entity %type with id %id', array('%type' => $job_item->getItemType(), '%id' => $job_item->getItemId())));
+     }
+@@ -96,7 +184,18 @@ class ContentEntitySource extends SourcePluginBase implements SourcePreviewInter
+       throw new TMGMTException(t('The %type entity %id with translation %lang does not exist.', array('%type' => $entity->getEntityTypeId(), '%id' => $entity->id(), '%lang' => $job_item->getJob()->getSourceLangcode())));
+     }
+ 
+-    $translation = $entity->getTranslation($job_item->getJob()->getSourceLangcode());
++    if (is_null($translationLanguageId)) {
++      $source_langcode = $job_item->getJob()->getSourceLangcode();
++      $translation = $entity->getTranslation($source_langcode);
++    }
++    elseif ($entity->hasTranslation($translationLanguageId)) {
++      $translation = $entity->getTranslation($translationLanguageId);
++    }
++
++    if (empty($translation)) {
++      return [];
++    }
++
+     $data = $this->extractTranslatableData($translation);
+     $entity_form_display = \Drupal::service('entity_display.repository')->getFormDisplay($job_item->getItemType(), $entity->bundle(), 'default');
+     uksort($data, function ($a, $b) use ($entity_form_display) {
+@@ -220,6 +319,23 @@ class ContentEntitySource extends SourcePluginBase implements SourcePreviewInter
+     return $data;
+   }
+ 
++  /**
++   * Determines whether an entity is moderated.
++   *
++   * @param \Drupal\Core\Entity\EntityInterface $entity
++   *   The entity.
++   *
++   * @return bool
++   *   TRUE if the entity is moderated. Otherwise, FALSE.
++   */
++  public static function isModeratedEntity(EntityInterface $entity) {
++    if (!\Drupal::moduleHandler()->moduleExists('content_moderation')) {
++      return FALSE;
++    }
++
++    return \Drupal::service('content_moderation.moderation_information')->isModeratedEntity($entity);
++  }
++
+   /**
+    * Returns fields that should be embedded into the data for the given entity.
+    *
+@@ -279,7 +395,8 @@ class ContentEntitySource extends SourcePluginBase implements SourcePreviewInter
+     }
+ 
+     $data = $job_item->getData();
+-    $this->doSaveTranslations($entity, $data, $target_langcode);
++
++    $this->doSaveTranslations($entity, $data, $target_langcode, $job_item);
+     return TRUE;
+   }
+ 
+@@ -356,11 +473,13 @@ class ContentEntitySource extends SourcePluginBase implements SourcePreviewInter
+    *   The translation data for the fields.
+    * @param string $target_langcode
+    *   The target language.
++   * @param \Drupal\tmgmt\JobItemInterface $item
++   *   The job item.
+    *
+    * @throws \Exception
+    *   Thrown when a field or field offset is missing.
+    */
+-  protected function doSaveTranslations(ContentEntityInterface $entity, array $data, $target_langcode) {
++  protected function doSaveTranslations(ContentEntityInterface $entity, array $data, $target_langcode, JobItemInterface $item) {
+     // If the translation for this language does not exist yet, initialize it.
+     if (!$entity->hasTranslation($target_langcode)) {
+       $entity->addTranslation($target_langcode, $entity->toArray());
+@@ -392,17 +511,158 @@ class ContentEntitySource extends SourcePluginBase implements SourcePreviewInter
+       $field = $translation->get($field_name);
+       foreach (Element::children($data[$field_name]) as $delta) {
+         $field_item = $data[$field_name][$delta];
++        $asymmetricDeltaToRemove = 0;
+         foreach (Element::children($field_item) as $property) {
++          // If the field is an embeddable reference and the property is a
++          // content entity, process it recursively.
++
++          // On the first translation, there are no asymmetric paragraphs yet
++          // and the referenced entities will match the ones from the source.
++
++          // Asymmetric translation if the Paragraph field is translatable.
+           if ($target_entity = $this->findReferencedEntity($field, $field_item, $delta, $property)) {
+-            // If the field is an embeddable reference and the property is a
+-            // content entity, process it recursively.
+-            $this->doSaveTranslations($target_entity, $field_item[$property], $target_langcode);
++            if ($target_entity instanceof ParagraphInterface && $target_entity->isTranslatable()) {
++              $duplicate = $this->createTranslationDuplicate($target_entity, $field_item[$property], $target_langcode, $item);
++              $duplicate->save();
++              $value = [
++                'target_id' => $duplicate->id(),
++                'target_revision_id' => $duplicate->getRevisionId(),
++              ];
++              $translation->get($field_name)->removeItem($asymmetricDeltaToRemove);
++              $translation->get($field_name)->appendItem($value);
++              $asymmetricDeltaToRemove++;
++              $this->doSaveTranslations($duplicate, $field_item[$property], $target_langcode, $item);
++            }
++            // Symmetric translation.
++            else {
++              $this->doSaveTranslations($target_entity, $field_item[$property], $target_langcode, $item);
++            }
+           }
++          // If the referenced entities are not matching, there is a possibility.
++          // that the asymmetric translation has been already done.
++          elseif (!$field->isEmpty()) {
++            // For next translations, the entity id's have changed
++            // as we are using a duplicate, so we need to get the entity
++            // from the asymmetric one.
++            // @todo introduce a variation of findReferencedEntity
++            //   and simplify these tests.
++            //$target_entity = $this->findAsymmetricReferencedEntity($field, $field_item, $delta, $property);
++            $field_value = $field->getValue();
++            if (
++              array_key_exists($delta, $field_value) &&
++              array_key_exists('target_id', $field_value[$delta]) &&
++              !empty($field_value[$delta]['target_id'])
++            ) {
++              // @todo check if we are targeting the right revision here.
++              $target_entity = Paragraph::load($field_value[$delta]['target_id']);
++              if (
++                $target_entity instanceof ParagraphInterface &&
++                $target_entity->hasTranslation($target_langcode)
++              ) {
++                // Fallback to the base case, do not duplicate.
++                $this->doSaveTranslations($target_entity, $field_item[$property], $target_langcode, $item);
++              }
++            }
++          }
++        }
++      }
++    }
++
++    if (isset($data['#moderation_state'][0]) && static::isModeratedEntity($translation)) {
++      // If the entity is moderated, set the moderation state for translation.
++      $translation->set('moderation_state', $data['#moderation_state'][0]);
++    }
++    // Otherwise, try to set a published status.
++    elseif (isset($data['#published'][0]) && $translation instanceof EntityPublishedInterface) {
++      $translation->setPublished($data['#published'][0]);
++    }
++
++    // Intermediate saving will re-save after with old paragraphs values.
++    if (!$entity instanceof ParagraphInterface) {
++      $translation = $this->createRevisionFromTranslation($entity, $translation, $item);
++      $translation->save();
++    }
++  }
++
++  /**
++   * Creates a new revision from a content entity translation.
++   *
++   * @param \Drupal\Core\Entity\ContentEntityInterface $entity
++   * @param $translation
++   * @param \Drupal\tmgmt\JobItemInterface $item
++   *
++   * @return \Drupal\Core\Entity\TranslatableRevisionableInterface
++   *
++   * @throws \Drupal\Component\Plugin\Exception\InvalidPluginDefinitionException
++   * @throws \Drupal\Component\Plugin\Exception\PluginNotFoundException
++   * @throws \Drupal\Core\Entity\EntityMalformedException
++   */
++  private function createRevisionFromTranslation(ContentEntityInterface $entity, $translation, JobItemInterface $item) {
++    if ($entity->getEntityType()->isRevisionable()) {
++      /** @var \Drupal\Core\Entity\TranslatableRevisionableStorageInterface $storage */
++      $storage = \Drupal::entityTypeManager()->getStorage($entity->getEntityTypeId());
++
++      if ($storage instanceof TranslatableRevisionableStorageInterface) {
++        // Always create a new revision of the translation.
++        $translationRevision = $storage->createRevision($translation, $translation->isDefaultRevision());
++
++        if ($entity instanceof RevisionLogInterface) {
++          $translationRevision->setRevisionLogMessage($this->t('Created by translation job <a href=":url">@label</a>.', [
++            ':url' => $item->getJob()->toUrl()->toString(),
++            '@label' => $item->label(),
++          ]));
++        }
++      }
++    }
++    return $translationRevision;
++  }
++
++  /**
++   * Translates a paragraph recursively.
++   *
++   * Also, in case of a translatable paragraph, updates its original language
++   * and removes all other translations.
++   *
++   * @param \Drupal\paragraphs\ParagraphInterface $paragraph
++   *   The paragraph entity to clone.
++   * @param array $data
++   *   The translation data for the fields.
++   * @param string $langcode
++   *   Language code for all the clone entities created.
++   * @param \Drupal\tmgmt\JobItemInterface $item
++   *   The job item.
++   *
++   * @return \Drupal\paragraphs\ParagraphInterface
++   *   New paragraph object with the data from the original paragraph. Not
++   *   saved. All sub-paragraphs are clones as well.
++   */
++  protected function createTranslationDuplicate(ParagraphInterface $paragraph, $data, $langcode, JobItemInterface $jobItem) {
++    $duplicate = $paragraph->createDuplicate();
++
++    // Translates all sub-paragraphs recursively.
++    /** @var \Drupal\Core\Field\FieldItemListInterface $field */
++    foreach ($duplicate->getFields(FALSE) as $field) {
++      if ($field->getFieldDefinition()->getType() == 'entity_reference_revisions' && $field->getFieldDefinition()->getTargetEntityTypeId() == 'paragraph') {
++        foreach ($field as $item) {
++          $this->doSaveTranslations($item->entity, $data[$field->getName()][$item->getName()]['entity'], $langcode, $jobItem);
+         }
+       }
+     }
+ 
+-    $translation->save();
++    // Change the original language and remove possible translations.
++    if ($duplicate->isTranslatable() && !$duplicate->hasTranslation($langcode)) {
++      $duplicate->set('langcode', $langcode);
++      $this->doSaveTranslations($duplicate, $data, $langcode, $jobItem);
++      foreach ($duplicate->getTranslationLanguages(FALSE) as $language) {
++        try {
++          $duplicate->removeTranslation($language->getId());
++        } catch (\InvalidArgumentException $e) {
++          // Should never happen.
++        }
++      }
++    }
++
++    return $duplicate;
+   }
+ 
+   /**
+@@ -464,8 +724,7 @@ class ContentEntitySource extends SourcePluginBase implements SourcePreviewInter
+    */
+   public function shouldCreateContinuousItem(Job $job, $plugin, $item_type, $item_id) {
+     $continuous_settings = $job->getContinuousSettings();
+-    $entity_type_manager = \Drupal::entityTypeManager();
+-    $entity = $entity_type_manager->getStorage($item_type)->load($item_id);
++    $entity = static::load($item_type, $item_id, $job->getSourceLangcode());
+     $translation_manager = \Drupal::service('content_translation.manager');
+     $translation = $entity->hasTranslation($job->getTargetLangcode()) ? $entity->getTranslation($job->getTargetLangcode()) : NULL;
+     $metadata = isset($translation) ? $translation_manager->getTranslationMetadata($translation) : NULL;
+diff --git a/sources/content/tests/src/Functional/ContentEntitySourceContentModerationTest.php b/sources/content/tests/src/Functional/ContentEntitySourceContentModerationTest.php
+index 0f4b6ad71315..c950eb48b91a 100644
+--- a/sources/content/tests/src/Functional/ContentEntitySourceContentModerationTest.php
++++ b/sources/content/tests/src/Functional/ContentEntitySourceContentModerationTest.php
+@@ -2,6 +2,7 @@
+ 
+ namespace Drupal\Tests\tmgmt_content\Functional;
+ 
++use Drupal\node\Entity\Node;
+ use Drupal\Tests\tmgmt\Functional\TmgmtEntityTestTrait;
+ use Drupal\Tests\tmgmt\Functional\TMGMTTestBase;
+ use Drupal\workflows\Entity\Workflow;
+@@ -37,9 +38,20 @@ class ContentEntitySourceContentModerationTest extends TMGMTTestBase {
+ 
+     $this->addLanguage('de');
+     $this->addLanguage('es');
++    $this->addLanguage('fr');
++    $this->addLanguage('it');
+ 
++    $this->createNodeType('page', 'Page', TRUE);
+     $this->createNodeType('article', 'Article', TRUE);
+     $this->createEditorialWorkflow('article');
++
++    $this->loginAsAdmin([
++      'create translation jobs',
++      'submit translation jobs',
++      'accept translation jobs',
++      'administer blocks',
++      'administer content translation',
++    ]);
+   }
+ 
+   /**
+@@ -70,29 +82,382 @@ class ContentEntitySourceContentModerationTest extends TMGMTTestBase {
+       'uid' => $this->translator_user->id(),
+     ]);
+ 
+-    // Go to content overview and translate a node.
++    // Create a draft of the published node.
++    $draft_title = '[Draft] ' . $title;
++    $edit = [
++      'title[0][value]' => $draft_title,
++      'moderation_state[0][state]' => 'draft',
++    ];
++    $this->drupalPostForm('node/' . $node->id() . '/edit', $edit, 'Save');
++
++    // Go to content overview and translate a draft.
+     $this->drupalGet('admin/tmgmt/sources');
+-    $this->assertLink($title);
++    $this->assertLink($draft_title);
+     $edit = [
+       'items[' . $node->id() . ']' => $node->id(),
+     ];
+     $this->drupalPostForm(NULL, $edit, 'Request translation');
+     $this->assertText('One job needs to be checked out.');
+-    $this->assertText($title . ' (English to ?, Unprocessed)');
++    $this->assertText($draft_title . ' (English to ?, Unprocessed)');
+     $edit = [
+       'target_language' => 'de',
+     ];
+     $this->drupalPostForm(NULL, $edit, 'Submit to provider');
+-    $this->assertText(t('The translation of @title to German is finished and can now be reviewed.', ['@title' => $title]));
++    $this->assertText(t('The translation of @title to German is finished and can now be reviewed.', ['@title' => $draft_title]));
+ 
++    // Assert a draft label on the jobs overview page.
+     $this->drupalGet('admin/tmgmt/jobs');
++    $this->assertText($draft_title);
+     $this->clickLink('Manage');
+-    $this->assertText($title . ' (English to German, Active)');
++    $this->assertText($draft_title . ' (English to German, Active)');
+     $this->clickLink('Review');
+-    $this->assertText('Job item ' . $title);
++    $this->assertText('Job item ' . $draft_title);
+ 
+     // Assert there is no content moderation form element.
+     $this->assertNoFieldByName('moderation_state|0|value[source]');
++    // Assert custom content moderation form element.
++    $this->assertText('Current source state');
++    $this->assertText('Draft');
++    $this->assertOptionSelected('edit-moderation-state-new-state', 'draft');
++    // Change the moderation state of the translation to published.
++    $translation_title = 'de(de-ch): [Published] ' . $title;
++    $edit = [
++      'title|0|value[translation]' => $translation_title,
++      'moderation_state[new_state]' => 'published',
++    ];
++    $this->drupalPostForm(NULL, $edit, 'Save');
++    $this->assertText(t('The translation for @title has been saved successfully.', ['@title' => $draft_title]));
++    $this->clickLink('Review');
++    // The published state is preselected now.
++    $this->assertOptionSelected('edit-moderation-state-new-state', 'published');
++    $review_url = $this->getUrl();
++    // Assert the preview mode.
++    $this->clickLink('Preview');
++    $this->assertText(t('Preview of @title for German', ['@title' => $draft_title]));
++    $this->assertText($translation_title);
++    // Save the translation as completed and assert the published translation.
++    $this->drupalPostForm($review_url, [], 'Save as completed');
++    $this->assertText('Validation completed successfully.');
++    $this->assertText(t('The translation for @title has been accepted as @translation_title.', ['@title' => $draft_title, '@translation_title' => $translation_title]));
++    $this->clickLink($translation_title);
++    $this->assertUrl('de/node/' . $node->id());
++    $this->assertText($translation_title);
++    $this->clickLink('Revisions');
++    $this->assertText("Created by translation job $draft_title.");
++
++    // There is one translation revision.
++    $this->assertNodeTranslationsRevisionsCount($node->id(), 'de', 1);
++
++    // Assert the source entity has not changed.
++    $this->drupalGet('node/' . $node->id());
++    $this->assertText($title);
++    $this->drupalGet('node/' . $node->id() . '/latest');
++    $this->assertText($draft_title);
++
++    // Translate the node to Spanish and save it as a draft.
++    $edit = [
++      'target_language' => 'es',
++      'items[' . $node->id() . ']' => $node->id(),
++    ];
++    $this->drupalPostForm('admin/tmgmt/sources', $edit, 'Request translation');
++    $this->drupalPostForm(NULL, [], 'Submit to provider');
++    $this->assertText(t('The translation of @title to Spanish is finished and can now be reviewed.', ['@title' => $draft_title]));
++    $this->clickLink('reviewed');
++    // Spanish translation is saved as a draft.
++    $this->drupalPostForm(NULL, [], 'Save as completed');
++    $this->assertText(t('The translation for @title has been accepted.', ['@title' => $draft_title]));
++    $this->drupalGet('es/node/' . $node->id());
++    // The spanish translation is not published. English content is displayed.
++    $this->assertText($title);
++    $this->assertNoText('es: ' . $title);
++    $this->clickLink('Latest version');
++    $this->assertText('es: ' . $draft_title);
++
++    // There is one more revision in German created when Spanish translation was
++    // saved.
++    $this->assertNodeTranslationsRevisionsCount($node->id(), 'de', 2);
++    $this->assertNodeTranslationsRevisionsCount($node->id(), 'es', 1);
++
++    // Create a new revision in the source language.
++    $second_draft_title = "$draft_title (2)";
++    $edit = [
++      'title[0][value]' => $second_draft_title,
++      'moderation_state[0][state]' => 'draft',
++    ];
++    $this->drupalPostForm('node/' . $node->id() . '/edit', $edit, 'Save (this translation)');
++
++    // The update to the source language creates a new German revision.
++    $this->assertNodeTranslationsRevisionsCount($node->id(), 'de', 3);
++
++    // Create a draft revision in italian using core translation.
++    $edit = [
++      'title[0][value]' => "it: $second_draft_title",
++      'moderation_state[0][state]' => 'draft',
++    ];
++    $this->drupalPostForm('it/node/' . $node->id() . '/translations/add/en/it', $edit, 'Save (this translation)');
++    // New German revision has been created when Italian translation was added.
++    $this->assertNodeTranslationsRevisionsCount($node->id(), 'de', 4);
++
++    // Assert the source overview behavior.
++    $this->drupalGet('admin/tmgmt/sources');
++    $this->assertEqual(count($this->xpath('//tbody/tr')), 1);
++    // English is original language and it is linked.
++    $this->assertTextByXpath('//tbody/tr[1]/td[4]/@class', 'langstatus-en');
++    $this->assertTextByXpath('//tbody/tr[1]/td[4]/a/img/@title', 'Original language');
++    // There is no french translation.
++    $this->assertTextByXpath('//tbody/tr[1]/td[5]/@class', 'langstatus-fr');
++    $this->assertTextByXpath('//tbody/tr[1]/td[5]/img/@title', 'Not translated');
++    // There is a german translation (published).
++    $this->assertTextByXpath('//tbody/tr[1]/td[6]/@class', 'langstatus-de');
++    $this->assertTextByXpath('//tbody/tr[1]/td[6]/a/img/@title', 'Translation up to date');
++    // There is an italian translation (saved as a draft).
++    $this->assertTextByXpath('//tbody/tr[1]/td[7]/@class', 'langstatus-it');
++    $this->assertTextByXpath('//tbody/tr[1]/td[7]/a/img/@title', 'Translation up to date');
++    // There is a spanish translation (saved as a draft).
++    $this->assertTextByXpath('//tbody/tr[1]/td[8]/@class', 'langstatus-es');
++    $this->assertTextByXpath('//tbody/tr[1]/td[8]/a/img/@title', 'Translation up to date');
++
++    // Assert the content overview filters.
++    $edit = [
++      'search[target_language]' => 'de',
++      'search[target_status]' => 'untranslated',
++    ];
++    $this->drupalPostForm('admin/tmgmt/sources/content/node', $edit, 'Search');
++    // The german translation was published.
++    $this->assertText('No source items matching given criteria have been found.');
++    $this->assertNoLink($second_draft_title);
++    // The italian translation was saved as a draft.
++    $edit = [
++      'search[target_language]' => 'it',
++      'search[target_status]' => 'untranslated',
++    ];
++    $this->drupalPostForm(NULL, $edit, 'Search');
++    $this->assertText('No source items matching given criteria have been found.');
++    $this->assertNoLink($second_draft_title);
++    // The french translation does not exist.
++    $edit = [
++      'search[target_language]' => 'fr',
++      'search[target_status]' => 'untranslated',
++    ];
++    $this->drupalPostForm(NULL, $edit, 'Search');
++    $this->assertLink($second_draft_title);
++
++      // Translate a new revision to German.
++    $edit = [
++      'target_language' => 'de',
++      'items[' . $node->id() . ']' => $node->id(),
++    ];
++    $this->drupalPostForm('admin/tmgmt/sources', $edit, 'Request translation');
++    $this->drupalPostForm(NULL, [], 'Submit to provider');
++    $this->assertText(t('The translation of @title to German is finished and can now be reviewed.', ['@title' => $second_draft_title]));
++    $this->clickLink('reviewed');
++    $this->assertOptionSelected('edit-moderation-state-new-state', 'draft');
++    $this->drupalPostForm(NULL, [], 'Save as completed');
++
++    // Submitting another German translation creates a new revision.
++    $this->assertNodeTranslationsRevisionsCount($node->id(), 'de', 5);
++
++    // German language still shows the latest published translation.
++    $this->drupalGet('de/node/' . $node->id());
++    $this->assertText($translation_title);
++    $this->drupalGet('de/node/' . $node->id() . '/latest');
++    $this->assertText('de(de-ch): [Draft] Moderated node (2)');
++    $this->clickLink('Revisions');
++    $this->assertText('Created by translation job [Draft] Moderated node (2).');
++    $this->assertText('Created by translation job [Draft] Moderated node.');
++    // Italian translation was not published yet.
++    $this->drupalGet('it/node/' . $node->id());
++    $this->assertNoText('it: ' . $second_draft_title);
++    $this->clickLink('Latest version');
++    $this->assertText('it: ' . $second_draft_title);
++    // Spanish translation was not published either.
++    $this->drupalGet('es/node/' . $node->id());
++    $this->assertNoText('es: ' . $draft_title);
++    $this->clickLink('Latest version');
++    $this->assertText('es: ' . $draft_title);
++
++    // Create a published node.
++    $title = 'Published article';
++    $node = $this->createNode([
++      'title' => $title,
++      'type' => 'article',
++      'langcode' => 'en',
++      'moderation_state' => 'published',
++      'uid' => $this->translator_user->id(),
++    ]);
++    // Create a draft.
++    $draft_title = 'Draft article';
++    $edit = [
++      'title[0][value]' => $draft_title,
++      'moderation_state[0][state]' => 'draft',
++    ];
++    $this->drupalPostForm('node/' . $node->id() . '/edit', $edit, 'Save');
++    // Publish a translation in German.
++    $edit = [
++      'title[0][value]' => "de: $draft_title",
++      'moderation_state[0][state]' => 'published',
++    ];
++    $this->drupalPostForm('de/node/' . $node->id() . '/translations/add/en/de', $edit, 'Save (this translation)');
++
++    // Provide another translation in German using TMGMT.
++    $edit = [
++      'items[' . $node->id() . ']' => $node->id(),
++      'target_language' => 'de',
++    ];
++    $this->drupalPostForm('admin/tmgmt/sources', $edit, 'Request translation');
++    $this->drupalPostForm(NULL, [], 'Submit to provider');
++    $this->assertText("The translation of $draft_title to German is finished and can now be reviewed.");
++    $this->clickLink('reviewed');
++    $this->assertOptionSelected('edit-moderation-state-new-state', 'draft');
++    $edit = [
++      'moderation_state[new_state]' => 'published',
++    ];
++    $this->drupalPostForm(NULL, $edit, 'Save as completed');
++    $this->assertText("The translation for $draft_title has been accepted as de(de-ch): $draft_title.");
++
++    // Provide translation in Spanish as well.
++    $edit = [
++      'items[' . $node->id() . ']' => $node->id(),
++      'target_language' => 'es',
++    ];
++    $this->drupalPostForm('admin/tmgmt/sources', $edit, 'Request translation');
++    $this->drupalPostForm(NULL, [], 'Submit to provider');
++    $this->assertText("The translation of $draft_title to Spanish is finished and can now be reviewed.");
++    $this->clickLink('reviewed');
++    $edit = [
++      'moderation_state[new_state]' => 'published',
++    ];
++    $this->drupalPostForm(NULL, $edit, 'Save as completed');
++    $this->assertText("The translation for $draft_title has been accepted as es: $draft_title.");
++
++    // The latest revision contains all the translations.
++    $node = Node::load($node->id());
++    $this->assertEqual(array_keys($node->getTranslationLanguages()), ['en', 'de', 'es']);
++
++    // Create a node in German language.
++    $node = $this->createNode([
++      'title' => 'Moderated node (de)',
++      'type' => 'article',
++      'langcode' => 'de',
++      'moderation_state' => 'published',
++      'uid' => $this->translator_user->id(),
++    ]);
++    // Create a draft of the published node.
++    $edit = [
++      'title[0][value]' => 'Draft node (de)',
++      'moderation_state[0][state]' => 'draft',
++    ];
++    $this->drupalPostForm('node/' . $node->id() . '/edit', $edit, 'Save');
++    // Go to the overview and and assert there is a draft in german language.
++    $this->drupalGet('admin/tmgmt/sources');
++    $this->assertText('Draft node (de)');
++    $this->assertNoText('Moderated node (de)');
++  }
++
++  /**
++   * Asserts number of revisions for the given node ID and language code.
++   */
++  protected function assertNodeTranslationsRevisionsCount($id, $langcode, $expected) {
++    $translation_revisions_count = \Drupal::entityQuery('node')
++      ->condition('nid', $id)
++      ->condition('langcode', $langcode)
++      ->allRevisions()
++      ->count()
++      ->execute();
++    $this->assertEqual($expected, $translation_revisions_count);
++  }
++
++  /**
++   * Test the non-moderated workflow with translatable nodes.
++   */
++  function testNonModeratedContentTranslations() {
++    $this->loginAsTranslator([
++      'translate any entity',
++      'create content translations',
++      'administer nodes',
++      'bypass node access',
++    ]);
++
++    // Create an unpublished node in English.
++    $title = 'Non-moderated node';
++    $node = $this->createNode([
++      'title' => $title,
++      'type' => 'page',
++      'langcode' => 'en',
++      'status' => FALSE,
++      'uid' => $this->translator_user->id(),
++    ]);
++
++    // Go to content overview and translate the unpublished node.
++    $this->drupalGet('admin/tmgmt/sources');
++    $this->assertLink($title);
++    $edit = [
++      'items[' . $node->id() . ']' => $node->id(),
++    ];
++    $this->drupalPostForm(NULL, $edit, 'Request translation');
++    $this->assertText('One job needs to be checked out.');
++    $this->assertText($title . ' (English to ?, Unprocessed)');
++    $edit = [
++      'target_language' => 'de',
++    ];
++    $this->drupalPostForm(NULL, $edit, 'Submit to provider');
++    $this->assertText(t('The translation of @title to German is finished and can now be reviewed.', ['@title' => $title]));
++
++    // Assert a draft label on the jobs overview page.
++    $this->clickLink('reviewed');
++    $this->assertText('Job item ' . $title);
++    // No moderation form element is displayed for non-moderated entities.
++    $this->assertNoText('Current source state');
++    $this->assertText('Translation publish status');
++    // The source node is not published so translation inherits the state.
++    $this->assertNoFieldChecked('edit-status-published');
++    // Publish the translation.
++    $translation_title = 'de(de-ch): [Published] ' . $title;
++    $edit = [
++      'title|0|value[translation]' => $translation_title,
++      'status[published]' => TRUE,
++    ];
++    $this->drupalPostForm(NULL, $edit, 'Save');
++    $this->assertText(t('The translation for @title has been saved successfully.', ['@title' => $title]));
++    $this->clickLink('Review');
++    // The published field is preselected now.
++    $this->assertFieldChecked('edit-status-published');
++    // Save the translation as completed and assert the published translation.
++    $this->drupalPostForm(NULL, [], 'Save as completed');
++    $this->assertText('Validation completed successfully.');
++    $this->assertText(t('The translation for @title has been accepted as @translation_title.', ['@title' => $title, '@translation_title' => $translation_title]));
++    $this->clickLink($translation_title);
++    $this->assertUrl('de/node/' . $node->id());
++    $this->assertText($translation_title);
++    $this->clickLink('Revisions');
++    $this->assertText("Created by translation job $title.");
++
++    // There is one translation revision.
++    $this->assertNodeTranslationsRevisionsCount($node->id(), 'de', 1);
++
++    // Create an unpublished Spanish translation.
++    $edit = [
++      'target_language' => 'es',
++      'items[' . $node->id() . ']' => $node->id(),
++    ];
++    $this->drupalPostForm('admin/tmgmt/sources', $edit, 'Request translation');
++    $this->drupalPostForm(NULL, [], 'Submit to provider');
++    $this->assertText(t('The translation of @title to Spanish is finished and can now be reviewed.', ['@title' => $title]));
++    $this->clickLink('reviewed');
++    $this->drupalPostForm(NULL, [], 'Save as completed');
++    // Spanish translation is unpublished.
++    $this->assertText(t('The translation for @title has been accepted as es: @title', ['@title' => $title]));
++    $this->drupalLogout();
++
++    // The spanish translation is not published.
++    $this->drupalGet('es/node/' . $node->id());
++    $this->assertResponse(403);
++    // The source is still unpublished.
++    $this->drupalGet('node/' . $node->id());
++    $this->assertResponse(403);
++    // The german translation is published.
++    $this->drupalGet('de/node/' . $node->id());
++    $this->assertResponse(200);
+   }
+ 
+   /**
+diff --git a/sources/content/tests/src/Functional/ContentTmgmtEntitySourceNoCanonicalLinkTest.php b/sources/content/tests/src/Functional/ContentTmgmtEntitySourceNoCanonicalLinkTest.php
+index 7d279f17a2ed..4d60e25e9dcd 100644
+--- a/sources/content/tests/src/Functional/ContentTmgmtEntitySourceNoCanonicalLinkTest.php
++++ b/sources/content/tests/src/Functional/ContentTmgmtEntitySourceNoCanonicalLinkTest.php
+@@ -72,6 +72,10 @@ class ContentTmgmtEntitySourceNoCanonicalLinkTest extends TMGMTTestBase {
+ 
+     // Review and save the entity translation.
+     $this->clickLink('reviewed');
++    // Non-publishable and non-moderated entities do not have publish status
++    // form element.
++    $this->assertNoText('Translation publish status');
++    $this->assertNoField('edit-moderation-state-new-state');
+     $this->drupalPostForm(NULL, NULL, 'Save as completed');
+     $this->assertTitle($entity->label() . ' (English to German, Finished) | Drupal');
+     $this->assertText('The translation for name english has been accepted as de(de-ch): name english.');
+diff --git a/sources/content/tests/src/Functional/ContentTmgmtEntitySourceUiTest.php b/sources/content/tests/src/Functional/ContentTmgmtEntitySourceUiTest.php
+index e194c4a49ff1..67e5c0200d77 100644
+--- a/sources/content/tests/src/Functional/ContentTmgmtEntitySourceUiTest.php
++++ b/sources/content/tests/src/Functional/ContentTmgmtEntitySourceUiTest.php
+@@ -468,6 +468,8 @@ class ContentTmgmtEntitySourceUiTest extends TMGMTTestBase {
+       'skip comment approval',
+       'edit own comments',
+       'access comments',
++      'administer comments',
++      'bypass node access',
+     ));
+     $this->loginAsTranslator($permissions, TRUE);
+ 
+@@ -526,6 +528,37 @@ class ContentTmgmtEntitySourceUiTest extends TMGMTTestBase {
+     $this->clickLink('es: ' . $comment->getSubject());
+     $this->drupalGet('es/node/' . $comment->id());
+     $this->assertText('es: ' . $comment->get('comment_body')->value);
++
++    // Disable auto-accept.
++    $default_translator
++      ->setAutoAccept(FALSE)
++      ->save();
++
++    // Request translation to Italian.
++    $edit = [
++      'languages[it]' => TRUE,
++    ];
++    $this->drupalPostForm('comment/' . $comment->id() . '/translations', $edit, 'Request translation');
++    $this->drupalPostForm(NULL, [], 'Submit to provider');
++    $this->clickLink('reviewed');
++    $this->assertText('Translation publish status');
++    $this->assertFieldChecked('edit-status-published', 'Target publish status field is checked.');
++    // Do not publish the Italian translation.
++    $edit = [
++      'status[published]' => FALSE,
++    ];
++    $this->drupalPostForm(NULL, $edit, 'Save as completed');
++    $this->drupalGet('it/comment/' . $comment->id());
++    $this->assertText('it: ' . $comment->getSubject());
++    // Original entity and other translations are not affected.
++    $this->drupalGet('comment/' . $comment->id());
++    $this->assertResponse(200);
++    $this->assertText($comment->getSubject());
++    $this->drupalGet('de/comment/' . $comment->id());
++    $this->assertResponse(200);
++    $this->drupalLogout();
++    $this->drupalGet('it/comment/' . $comment->id());
++    $this->assertResponse(403);
+   }
+ 
+   /**
+diff --git a/sources/content/tmgmt_content.module b/sources/content/tmgmt_content.module
+index 23d526c1a1d1..db0008ddd86e 100644
+--- a/sources/content/tmgmt_content.module
++++ b/sources/content/tmgmt_content.module
+@@ -29,7 +29,7 @@ function tmgmt_content_tmgmt_source_suggestions(array $items, JobInterface $job)
+   foreach ($items as $item) {
+     if ($item instanceof JobItemInterface && $item->getPlugin() == 'content') {
+       // Load the entity, skip if it can't be loaded.
+-      $entity = \Drupal::entityTypeManager()->getStorage($item->getItemType())->load($item->getItemId());
++      $entity = ContentEntitySource::load($item->getItemType(), $item->getItemId(), $job->getSourceLangcode());
+       if (!$entity || !($entity instanceof ContentEntityInterface)) {
+         continue;
+       }
+diff --git a/src/Entity/JobItem.php b/src/Entity/JobItem.php
+index 559ff548e323..02da8d191f06 100644
+--- a/src/Entity/JobItem.php
++++ b/src/Entity/JobItem.php
+@@ -371,11 +371,17 @@ class JobItem extends ContentEntityBase implements JobItemInterface {
+   /**
+    * {@inheritdoc}
+    */
+-  public function getData($key = array(), $index = NULL) {
++  public function getData($key = array(), $index = NULL, $langcode = NULL) {
+     $this->decodeData();
+     if (empty($this->unserializedData) && $this->getJobId()) {
+-      // Load the data from the source if it has not been set yet.
+-      $this->unserializedData = $this->getSourceData();
++      // Load the data from the source or the translation
++      // if it has not been set yet.
++      if (is_null($langcode)) {
++        $this->unserializedData = $this->getSourceData();
++      }
++      else {
++        $this->unserializedData = $this->getTranslationData($langcode);
++      }
+       $this->save();
+     }
+     if (empty($key)) {
+@@ -400,6 +406,19 @@ class JobItem extends ContentEntityBase implements JobItemInterface {
+     return array();
+   }
+ 
++  /**
++   * {@inheritdoc}
++   */
++  public function getTranslationData($langcode) {
++    if ($plugin = $this->getSourcePlugin()) {
++      $data = $plugin->getData($this, $langcode);
++      /** @var \Drupal\tmgmt\SegmenterInterface $segmenter */
++      $segmenter = \Drupal::service('tmgmt.segmenter');
++      return $segmenter->getSegmentedData($data);
++    }
++    return array();
++  }
++
+   /**
+    * {@inheritdoc}
+    */
+@@ -484,12 +503,14 @@ class JobItem extends ContentEntityBase implements JobItemInterface {
+     if (!isset($message)) {
+       $source_url = $this->getSourceUrl();
+       try {
++        // @todo: Make sure we use the latest revision.
++        //   Fix in https://www.drupal.org/project/tmgmt/issues/2979126.
+         $translation = \Drupal::entityTypeManager()->getStorage($this->getItemType())->load($this->getItemId());
+       }
+       catch (PluginNotFoundException $e) {
+         $translation = NULL;
+       }
+-      if (isset($translation)) {
++      if (isset($translation) && $translation->hasTranslation($this->getJob()->getTargetLangcode())) {
+         $translation = $translation->getTranslation($this->getJob()->getTargetLangcode());
+         try {
+           $translation_url = $translation->toUrl();
+diff --git a/src/JobItemInterface.php b/src/JobItemInterface.php
+index 5eb336aaa572..29c3c4bf041d 100644
+--- a/src/JobItemInterface.php
++++ b/src/JobItemInterface.php
+@@ -190,17 +190,24 @@ interface JobItemInterface extends ContentEntityInterface {
+    *   If present, only the subarray identified by key is returned.
+    * @param int $index
+    *   Optional index of an attribute below $key.
++   * @param string $langcode
++   *   Optional language id.
+    *
+    * @return array
+    *   A structured data array.
+    */
+-  public function getData($key = array(), $index = NULL);
++  public function getData($key = array(), $index = NULL, $langcode = NULL);
+ 
+   /**
+    * Loads the structured source data array from the source.
+    */
+   public function getSourceData();
+ 
++  /**
++   * Loads the structured translation data array from the translation.
++   */
++  public function getTranslationData($langcode);
++
+   /**
+    * Returns an instance of the configured source plugin.
+    *
+diff --git a/src/SourcePluginInterface.php b/src/SourcePluginInterface.php
+index f8d7cfac5d71..de175404f43f 100644
+--- a/src/SourcePluginInterface.php
++++ b/src/SourcePluginInterface.php
+@@ -16,10 +16,12 @@ interface SourcePluginInterface extends PluginInspectionInterface {
+    *
+    * @param \Drupal\tmgmt\JobItemInterface $job_item
+    *   The job item entity.
++   * @param string $langcode
++   *   Optional language id.
+    *
+    * @see JobItem::getData()
+    */
+-  public function getData(JobItemInterface $job_item);
++  public function getData(JobItemInterface $job_item, $langcode = NULL);
+ 
+   /**
+    * Saves a translation.
+diff --git a/src/Tests/EntityTestBase.php b/src/Tests/EntityTestBase.php
+index 0a2baf9878ea..5fc2c6b67cc0 100644
+--- a/src/Tests/EntityTestBase.php
++++ b/src/Tests/EntityTestBase.php
+@@ -11,7 +11,7 @@ use Drupal\taxonomy\Entity\Term;
+ use Drupal\taxonomy\Entity\Vocabulary;
+ use Drupal\taxonomy\VocabularyInterface;
+ 
+-@trigger_error('The ' . __NAMESPACE__ . '\EntityTestBase is deprecated. Instead, use Drupal\tmgmt\Tests\EntityTestBase. See https://www.drupal.org/node/2971931.', E_USER_DEPRECATED);
++@trigger_error('The ' . __NAMESPACE__ . '\EntityTestBase is deprecated. Instead, use \Drupal\Tests\tmgmt\Functional\TmgmtEntityTestTrait. See https://www.drupal.org/node/2971931.', E_USER_DEPRECATED);
+ 
+ /**
+  * Utility test case class with helper methods to create entities and their
+diff --git a/tests/src/Functional/TmgmtTestTrait.php b/tests/src/Functional/TmgmtTestTrait.php
+index 16200e39d657..e6707ee0a63b 100644
+--- a/tests/src/Functional/TmgmtTestTrait.php
++++ b/tests/src/Functional/TmgmtTestTrait.php
+@@ -190,4 +190,16 @@ trait TmgmtTestTrait {
+     $this->drupalGet($url_target);
+   }
+ 
++  /**
++   * Asserts text in the page with an xpath expression.
++   *
++   * @param string $xpath
++   *   The XPath expression.
++   * @param string $text
++   *   The text to compare.
++   */
++  protected function assertTextByXpath($xpath, $text) {
++    $this->assertEqual((string) $this->xpath($xpath)[0]->getText(), $text);
++  }
++
+ }
+diff --git a/translators/tmgmt_file/src/FileTranslatorUi.php b/translators/tmgmt_file/src/FileTranslatorUi.php
+index e504ae215d8e..fadeb4600c01 100644
+--- a/translators/tmgmt_file/src/FileTranslatorUi.php
++++ b/translators/tmgmt_file/src/FileTranslatorUi.php
+@@ -36,15 +36,26 @@ class FileTranslatorUi extends TranslatorPluginUiBase {
+         ],
+       ],
+     ];
++
++    $target_options = [];
++    $format_configuration = $translator->getSetting('format_configuration');
++    // BC shorthand for single valued config.
++    // @todo requires configuration update (update or post update hook).
++    if (!is_array($format_configuration['target'])) {
++      $target_options[] = $format_configuration['target'];
++    }
++    else {
++      $target_options = $format_configuration['target'];
++    }
+     $form['format_configuration']['target'] = [
+-      '#type' => 'select',
++      '#type' => 'checkboxes',
+       '#title' => t('Target content'),
+       '#options' => [
+         'source' => t('Same as source'),
++        'translation' => t('Same as translation'),
+       ],
+-      '#empty_option' => t('Empty'),
+-      '#default_value' => $translator->getSetting('format_configuration.target'),
+-      '#description' => t('Defines what the &lt;target&gt; in the XLIFF file should contain, either empty or the same as the source text.'),
++      '#default_value' => $target_options,
++      '#description' => t('Defines what the &lt;target&gt; in the XLIFF file should contain. Empty, same as the source text, same as the translation text for multiple translations. If both are checked, translation will fallback to source when not available.'),
+     ] + $xliff_states;
+ 
+     $form['xliff_cdata'] = [
+diff --git a/translators/tmgmt_file/src/Plugin/tmgmt_file/Format/Xliff.php b/translators/tmgmt_file/src/Plugin/tmgmt_file/Format/Xliff.php
+index 3c1655be9f58..6accd0c66602 100644
+--- a/translators/tmgmt_file/src/Plugin/tmgmt_file/Format/Xliff.php
++++ b/translators/tmgmt_file/src/Plugin/tmgmt_file/Format/Xliff.php
+@@ -107,8 +107,23 @@ class Xliff extends \XMLWriter implements FormatInterface {
+ 
+     // @todo: Write in nested groups instead of flattening it.
+     $data = \Drupal::service('tmgmt.data')->filterTranslatable($item->getData());
++
++    $translation_data = [];
++    // Add translation if configured.
++    if ($this->configuration['target']['translation'] === 'translation') {
++      $translation_data = \Drupal::service('tmgmt.data')->filterTranslatable($item->getTranslationData($this->job->getTargetLangcode()));
++      // Fallback to the source if configured.
++      if (empty($translation_data) && $this->configuration['target']['source'] === 'source') {
++        $translation_data = $data;
++      }
++    }
++
+     foreach ($data as $key => $element) {
+-      $this->addTransUnit($item->id() . '][' . $key, $element, $this->job);
++      $translated_element = [];
++      if (array_key_exists($key, $translation_data)) {
++        $translated_element = $translation_data[$key];
++      }
++      $this->addTransUnit($item->id() . '][' . $key, $element, $translated_element, $this->job);
+     }
+     $this->endElement();
+   }
+@@ -120,10 +135,12 @@ class Xliff extends \XMLWriter implements FormatInterface {
+    *   The unique identifier for this data element.
+    * @param $element
+    *   Array with the properties #text and optionally #label.
++   * @param $translated_element
++   *   Array with the properties #text and optionally #label.
+    * @param \Drupal\tmgmt\JobInterface $job
+    *   Translation job.
+    */
+-  protected function addTransUnit($key, $element, JobInterface $job) {
++  protected function addTransUnit($key, $element, $translated_element, JobInterface $job) {
+ 
+     $key_array = \Drupal::service('tmgmt.data')->ensureArrayKey($key);
+ 
+@@ -143,8 +160,12 @@ class Xliff extends \XMLWriter implements FormatInterface {
+     if (!empty($element['#translation']['#text'])) {
+       $this->writeData($element['#text'], $key_array);
+     }
++    // Fill the target translation data if any.
++    elseif (!empty($translated_element) && $this->configuration['target']['translation'] === 'translation') {
++      $this->writeData($translated_element['#text'], $key_array);
++    }
+     // Fill the target translation data with the source content.
+-    elseif (!empty($this->configuration['target']) && $this->configuration['target'] === 'source') {
++    elseif ($this->configuration['target']['source'] === 'source') {
+       $this->writeData($element['#text'], $key_array);
+     }
+ 

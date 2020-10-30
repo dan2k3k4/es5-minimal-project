@@ -1,0 +1,13 @@
+diff --git a/src/Entity/JobItem.php b/src/Entity/JobItem.php
+index 559ff548e323..55ebdffae3b8 100644
+--- a/src/Entity/JobItem.php
++++ b/src/Entity/JobItem.php
+@@ -876,7 +876,7 @@ class JobItem extends ContentEntityBase implements JobItemInterface {
+    * {@inheritdoc}
+    */
+   public function abortTranslation() {
+-    if (!$this->isActive() || !$this->getTranslatorPlugin()) {
++    if ((!$this->isActive() && !$this->isNeedsReview()) || !$this->getTranslatorPlugin()) {
+       throw new TMGMTException('Cannot abort job item.');
+     }
+     $this->setState(JobItemInterface::STATE_ABORTED);

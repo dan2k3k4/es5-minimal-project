@@ -1,0 +1,48 @@
+<div class="locations-overview">
+    <h1>{% trans 'Locations' with {'context': 'Storybook frontend'} %}</h1>
+    {% if not graphql.regionalOffice|length and not graphql.partner|length %}
+        {% trans 'No locations found.' with {'context': 'Storybook frontend'} %}
+    {% else %}
+        <section class="tabs">
+            <zi-tabs-location>
+                <ul class="tabs__items left-align" role="tablist">
+                    {% if graphql.regionalOffice|length %}
+                        <li class="tabs__item" role="presentation">
+                            <a class="tabs__action" id="regional-office" href="#regional-office" role="tab" aria-selected="false">
+                                {% trans 'Regional Offices' with {'context': 'Storybook frontend'} %}
+                            </a>
+                        </li>
+                    {% endif %}
+                    {% if graphql.partner|length %}
+                        <li class="tabs__item" role="presentation">
+                            <a class="tabs__action {% if not graphql.regionalOffice|length %} active {% endif %}" id="partners" href="#partners" role="tab" aria-selected="false">
+                                {% trans 'Partners' with {'context': 'Storybook frontend'} %}
+                            </a>
+                        </li>
+                    {% endif %}
+                </ul>
+
+                <div class="content-wrapper">
+                    {% if graphql.regionalOffice|length %}
+                        <section class="tabs__content inner" hidden id="#regional-office" role="tabpanel" aria-labelledby="regional-office">
+                            {% for location in graphql.regionalOffice %}
+                                {% include '@twig/components/locations/location/location.html.twig' with {
+                  location: location
+                } only %}
+                            {% endfor %}
+                        </section>
+                    {% endif %}
+                    {% if graphql.partner|length %}
+                        <section class="tabs__content inner" hidden id="#partners" role="tabpanel" aria-labelledby="partner">
+                            {% for location in graphql.partner %}
+                                {% include '@twig/components/locations/location/location.html.twig' with {
+                  location: location
+                } only %}
+                            {% endfor %}
+                        </section>
+                    {% endif %}
+                </div>
+            </zi-tabs-location>
+        </section>
+    {% endif %}
+</div>

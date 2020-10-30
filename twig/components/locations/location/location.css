@@ -1,0 +1,54 @@
+.location {
+  padding: var(--space-200);
+  width: 100%;
+  font-size: 1.3rem;
+  display: flex;
+
+  @media (--tablet-up) {
+    width: 50%;
+  }
+
+  @media (--desktop-up) {
+    width: 33.3333%;
+  }
+
+  &__content {
+    padding: var(--space-400);
+    background-color: var(--white);
+    transition: box-shadow var(--transition);
+    width: 100%;
+
+    &:hover {
+      box-shadow: var(--shadow-14);
+    }
+
+    .h3 {
+      color: var(--blue);
+    }
+  }
+
+  &__detail {
+    display: flex;
+
+    @media (--mobile-down) {
+      display: block;
+    }
+
+    & p,
+    & li {
+      margin-bottom: var(--space-50);
+    }
+
+    &.address {
+      margin-bottom: var(--space-300);
+    }
+
+    & .location-label {
+      flex-basis: 24%;
+    }
+
+    & .content {
+      flex-basis: 74%;
+    }
+  }
+}

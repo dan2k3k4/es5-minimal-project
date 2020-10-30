@@ -1,0 +1,65 @@
+diff --git a/css/zhi-logo.css b/css/zhi-logo.css
+new file mode 100644
+index 0000000..19aa825
+--- /dev/null
++++ b/css/zhi-logo.css
+@@ -0,0 +1,17 @@
++.sk-zhi-logo {
++  display: block;
++  width: 100px;
++  height: 100px;
++  background-image: none;
++  z-index: 10;
++  position: fixed;
++  left: 50%;
++  top: 50%;
++  transform: translate(-50%, -50%);
++}
++
++.ajax-progress-fullscreen {
++  background-color: rgba(255, 255, 255, 0.9);
++  width: 100% !important;
++  height: 100% !important;
++}
+diff --git a/src/Plugin/ajax_loader/ThrobberZHILogo.php b/src/Plugin/ajax_loader/ThrobberZHILogo.php
+new file mode 100644
+index 0000000..597f738
+--- /dev/null
++++ b/src/Plugin/ajax_loader/ThrobberZHILogo.php
+@@ -0,0 +1,36 @@
++<?php
++
++namespace Drupal\ajax_loader\Plugin\ajax_loader;
++
++use Drupal\ajax_loader\ThrobberPluginBase;
++
++/**
++ * Class ZhiLogo.
++ *
++ * @Throbber(
++ *   id = "throbber_zhi_logo",
++ *   label = @Translation("ZHI Logo")
++ * )
++ */
++class ThrobberZhiLogo extends ThrobberPluginBase {
++
++  /**
++   * Function to set markup.
++   *
++   * @inheritdoc
++   */
++  protected function setMarkup() {
++    return '<div class="ajax-throbber sk-zhi-logo">
++            </div>';
++  }
++
++  /**
++   * Function to set css file.
++   *
++   * @inheritdoc
++   */
++  protected function setCssFile() {
++    return $this->path . '/css/zhi-logo.css';
++  }
++
++}

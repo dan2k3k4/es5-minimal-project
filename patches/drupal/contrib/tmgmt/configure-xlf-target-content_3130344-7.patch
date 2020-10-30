@@ -1,0 +1,218 @@
+diff --git a/sources/content/src/Plugin/tmgmt/Source/ContentEntitySource.php b/sources/content/src/Plugin/tmgmt/Source/ContentEntitySource.php
+index 663790c6a219..9702a5f0bdb1 100644
+--- a/sources/content/src/Plugin/tmgmt/Source/ContentEntitySource.php
++++ b/sources/content/src/Plugin/tmgmt/Source/ContentEntitySource.php
+@@ -81,7 +81,7 @@ class ContentEntitySource extends SourcePluginBase implements SourcePreviewInter
+    * Returns the data from the fields as a structure that can be processed by
+    * the Translation Management system.
+    */
+-  public function getData(JobItemInterface $job_item) {
++  public function getData(JobItemInterface $job_item, $langcode = NULL) {
+     $entity = $this->getEntity($job_item);
+     if (!$entity) {
+       throw new TMGMTException(t('Unable to load entity %type with id %id', array('%type' => $job_item->getItemType(), '%id' => $job_item->getItemId())));
+@@ -96,7 +96,18 @@ class ContentEntitySource extends SourcePluginBase implements SourcePreviewInter
+       throw new TMGMTException(t('The %type entity %id with translation %lang does not exist.', array('%type' => $entity->getEntityTypeId(), '%id' => $entity->id(), '%lang' => $job_item->getJob()->getSourceLangcode())));
+     }
+ 
+-    $translation = $entity->getTranslation($job_item->getJob()->getSourceLangcode());
++    if (is_null($langcode)) {
++      $source_langcode = $job_item->getJob()->getSourceLangcode();
++      $translation = $entity->getTranslation($source_langcode);
++    }
++    elseif ($entity->hasTranslation($langcode)) {
++      $translation = $entity->getTranslation($langcode);
++    }
++
++    if (empty($translation)) {
++      return [];
++    }
++
+     $data = $this->extractTranslatableData($translation);
+     $entity_form_display = \Drupal::service('entity_display.repository')->getFormDisplay($job_item->getItemType(), $entity->bundle(), 'default');
+     uksort($data, function ($a, $b) use ($entity_form_display) {
+diff --git a/src/Entity/JobItem.php b/src/Entity/JobItem.php
+index 559ff548e323..c3d3af8ebe4f 100644
+--- a/src/Entity/JobItem.php
++++ b/src/Entity/JobItem.php
+@@ -371,11 +371,17 @@ class JobItem extends ContentEntityBase implements JobItemInterface {
+   /**
+    * {@inheritdoc}
+    */
+-  public function getData($key = array(), $index = NULL) {
++  public function getData($key = array(), $index = NULL, $langcode = NULL) {
+     $this->decodeData();
+     if (empty($this->unserializedData) && $this->getJobId()) {
+-      // Load the data from the source if it has not been set yet.
+-      $this->unserializedData = $this->getSourceData();
++      // Load the data from the source or the translation
++      // if it has not been set yet.
++      if (is_null($langcode)) {
++        $this->unserializedData = $this->getSourceData();
++      }
++      else {
++        $this->unserializedData = $this->getTranslationData($langcode);
++      }
+       $this->save();
+     }
+     if (empty($key)) {
+@@ -400,6 +406,19 @@ class JobItem extends ContentEntityBase implements JobItemInterface {
+     return array();
+   }
+ 
++  /**
++   * {@inheritdoc}
++   */
++  public function getTranslationData($langcode) {
++    if ($plugin = $this->getSourcePlugin()) {
++      $data = $plugin->getData($this, $langcode);
++      /** @var \Drupal\tmgmt\SegmenterInterface $segmenter */
++      $segmenter = \Drupal::service('tmgmt.segmenter');
++      return $segmenter->getSegmentedData($data);
++    }
++    return array();
++  }
++
+   /**
+    * {@inheritdoc}
+    */
+diff --git a/src/JobItemInterface.php b/src/JobItemInterface.php
+index 5eb336aaa572..29c3c4bf041d 100644
+--- a/src/JobItemInterface.php
++++ b/src/JobItemInterface.php
+@@ -190,17 +190,24 @@ interface JobItemInterface extends ContentEntityInterface {
+    *   If present, only the subarray identified by key is returned.
+    * @param int $index
+    *   Optional index of an attribute below $key.
++   * @param string $langcode
++   *   Optional language id.
+    *
+    * @return array
+    *   A structured data array.
+    */
+-  public function getData($key = array(), $index = NULL);
++  public function getData($key = array(), $index = NULL, $langcode = NULL);
+ 
+   /**
+    * Loads the structured source data array from the source.
+    */
+   public function getSourceData();
+ 
++  /**
++   * Loads the structured translation data array from the translation.
++   */
++  public function getTranslationData($langcode);
++
+   /**
+    * Returns an instance of the configured source plugin.
+    *
+diff --git a/src/SourcePluginInterface.php b/src/SourcePluginInterface.php
+index f8d7cfac5d71..de175404f43f 100644
+--- a/src/SourcePluginInterface.php
++++ b/src/SourcePluginInterface.php
+@@ -16,10 +16,12 @@ interface SourcePluginInterface extends PluginInspectionInterface {
+    *
+    * @param \Drupal\tmgmt\JobItemInterface $job_item
+    *   The job item entity.
++   * @param string $langcode
++   *   Optional language id.
+    *
+    * @see JobItem::getData()
+    */
+-  public function getData(JobItemInterface $job_item);
++  public function getData(JobItemInterface $job_item, $langcode = NULL);
+ 
+   /**
+    * Saves a translation.
+diff --git a/translators/tmgmt_file/src/FileTranslatorUi.php b/translators/tmgmt_file/src/FileTranslatorUi.php
+index e504ae215d8e..fadeb4600c01 100644
+--- a/translators/tmgmt_file/src/FileTranslatorUi.php
++++ b/translators/tmgmt_file/src/FileTranslatorUi.php
+@@ -36,15 +36,26 @@ class FileTranslatorUi extends TranslatorPluginUiBase {
+         ],
+       ],
+     ];
++
++    $target_options = [];
++    $format_configuration = $translator->getSetting('format_configuration');
++    // BC shorthand for single valued config.
++    // @todo requires configuration update (update or post update hook).
++    if (!is_array($format_configuration['target'])) {
++      $target_options[] = $format_configuration['target'];
++    }
++    else {
++      $target_options = $format_configuration['target'];
++    }
+     $form['format_configuration']['target'] = [
+-      '#type' => 'select',
++      '#type' => 'checkboxes',
+       '#title' => t('Target content'),
+       '#options' => [
+         'source' => t('Same as source'),
++        'translation' => t('Same as translation'),
+       ],
+-      '#empty_option' => t('Empty'),
+-      '#default_value' => $translator->getSetting('format_configuration.target'),
+-      '#description' => t('Defines what the &lt;target&gt; in the XLIFF file should contain, either empty or the same as the source text.'),
++      '#default_value' => $target_options,
++      '#description' => t('Defines what the &lt;target&gt; in the XLIFF file should contain. Empty, same as the source text, same as the translation text for multiple translations. If both are checked, translation will fallback to source when not available.'),
+     ] + $xliff_states;
+ 
+     $form['xliff_cdata'] = [
+diff --git a/translators/tmgmt_file/src/Plugin/tmgmt_file/Format/Xliff.php b/translators/tmgmt_file/src/Plugin/tmgmt_file/Format/Xliff.php
+index 3c1655be9f58..6accd0c66602 100644
+--- a/translators/tmgmt_file/src/Plugin/tmgmt_file/Format/Xliff.php
++++ b/translators/tmgmt_file/src/Plugin/tmgmt_file/Format/Xliff.php
+@@ -107,8 +107,23 @@ class Xliff extends \XMLWriter implements FormatInterface {
+ 
+     // @todo: Write in nested groups instead of flattening it.
+     $data = \Drupal::service('tmgmt.data')->filterTranslatable($item->getData());
++
++    $translation_data = [];
++    // Add translation if configured.
++    if ($this->configuration['target']['translation'] === 'translation') {
++      $translation_data = \Drupal::service('tmgmt.data')->filterTranslatable($item->getTranslationData($this->job->getTargetLangcode()));
++      // Fallback to the source if configured.
++      if (empty($translation_data) && $this->configuration['target']['source'] === 'source') {
++        $translation_data = $data;
++      }
++    }
++
+     foreach ($data as $key => $element) {
+-      $this->addTransUnit($item->id() . '][' . $key, $element, $this->job);
++      $translated_element = [];
++      if (array_key_exists($key, $translation_data)) {
++        $translated_element = $translation_data[$key];
++      }
++      $this->addTransUnit($item->id() . '][' . $key, $element, $translated_element, $this->job);
+     }
+     $this->endElement();
+   }
+@@ -120,10 +135,12 @@ class Xliff extends \XMLWriter implements FormatInterface {
+    *   The unique identifier for this data element.
+    * @param $element
+    *   Array with the properties #text and optionally #label.
++   * @param $translated_element
++   *   Array with the properties #text and optionally #label.
+    * @param \Drupal\tmgmt\JobInterface $job
+    *   Translation job.
+    */
+-  protected function addTransUnit($key, $element, JobInterface $job) {
++  protected function addTransUnit($key, $element, $translated_element, JobInterface $job) {
+ 
+     $key_array = \Drupal::service('tmgmt.data')->ensureArrayKey($key);
+ 
+@@ -143,8 +160,12 @@ class Xliff extends \XMLWriter implements FormatInterface {
+     if (!empty($element['#translation']['#text'])) {
+       $this->writeData($element['#text'], $key_array);
+     }
++    // Fill the target translation data if any.
++    elseif (!empty($translated_element) && $this->configuration['target']['translation'] === 'translation') {
++      $this->writeData($translated_element['#text'], $key_array);
++    }
+     // Fill the target translation data with the source content.
+-    elseif (!empty($this->configuration['target']) && $this->configuration['target'] === 'source') {
++    elseif ($this->configuration['target']['source'] === 'source') {
+       $this->writeData($element['#text'], $key_array);
+     }
+ 

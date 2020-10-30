@@ -1,0 +1,83 @@
+diff --git a/src/AthenaPdfConverter.php b/src/AthenaPdfConverter.php
+index fdc34241d42f..db67e567b4ac 100644
+--- a/src/AthenaPdfConverter.php
++++ b/src/AthenaPdfConverter.php
+@@ -106,6 +106,15 @@ class AthenaPdfConverter implements AthenaPdfConverterInterface {
+     return $id;
+   }
+ 
++  /**
++   * {@inheritDoc}
++   */
++  public function getMarkupFromState(String $id) {
++    $key = $this->getKey($id);
++    $markup = $this->state->get($key);
++    return $markup;
++  }
++
+   /**
+    * {@inheritDoc}.
+    */
+@@ -144,11 +153,15 @@ class AthenaPdfConverter implements AthenaPdfConverterInterface {
+    */
+   public function markupToPdf($markup) {
+     $id = $this->addItem($markup);
+-    $markupUrl = Url::fromUri("internal:/athenapdf_api/markup/$id", [
+-      'absolute' => TRUE,
+-    ])->toString();
+-
+-    return $this->urlToPdf($markupUrl);
++    $markupUrl = Url::fromRoute('athenapdf_api.athena_pdf_controller_markup',  ['id' => $id]);
++    $markupUrl = $markupUrl->setAbsolute(TRUE)->toString();
++    if (getenv('BASIC_AUTH_USERNAME') && getenv('BASIC_AUTH_PASSWORD')) {
++      $basicAuth = getenv('BASIC_AUTH_USERNAME') . ':' . getenv('BASIC_AUTH_PASSWORD') . '@';
++      $markupUrl = str_replace('://', '://' . $basicAuth, $markupUrl);
++    }
++    $pdf = $this->urlToPdf($markupUrl);
++    $this->burnAfterReading($id);
++    return $pdf;
+   }
+ 
+   /**
+diff --git a/src/AthenaPdfConverterInterface.php b/src/AthenaPdfConverterInterface.php
+index 785b94e55e71..65fdeee6f7f8 100644
+--- a/src/AthenaPdfConverterInterface.php
++++ b/src/AthenaPdfConverterInterface.php
+@@ -66,7 +66,7 @@ interface AthenaPdfConverterInterface {
+   public function internalPathToPdf(String $path, AccountInterface $account = NULL);
+ 
+   /**
+-   * Returns the markup stored under the given id.
++   * Adds to state and returns the markup stored under the given id.
+    *
+    * @param string $markup
+    *   The markup to save under the given id.
+@@ -76,6 +76,15 @@ interface AthenaPdfConverterInterface {
+    */
+   public function addItem(String $markup);
+ 
++  /**
++   * Returns the markup stored under the given id.
++   *
++   * @param String $id
++   *
++   * @return String
++   */
++  public function getMarkupFromState(String $id);
++
+   /**
+    * Returns the markup stored under the given id and removes it.
+    *
+diff --git a/src/Controller/AthenaPdfController.php b/src/Controller/AthenaPdfController.php
+index 4059c8102af9..e7aba2534b52 100644
+--- a/src/Controller/AthenaPdfController.php
++++ b/src/Controller/AthenaPdfController.php
+@@ -47,7 +47,7 @@ class AthenaPdfController extends ControllerBase {
+   public function markup($id) {
+     $response = new Response();
+ 
+-    $markup = $this->converter->burnAfterReading($id);
++    $markup = $this->converter->getMarkupFromState($id);
+ 
+     if ($markup) {
+       $response->setContent($markup);

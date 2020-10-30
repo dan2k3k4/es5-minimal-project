@@ -1,0 +1,17 @@
+diff --git a/src/FormOverrides.php b/src/FormOverrides.php
+index 74b81eb..5fa0d18 100755
+--- a/src/FormOverrides.php
++++ b/src/FormOverrides.php
+@@ -128,10 +128,8 @@ class FormOverrides {
+         }
+ 
+         if ($this->configFactory->get('config_override_warn.settings')->get('show_values')) {
+-          $overrides[$name][$key] = [
+-            'original' => var_export($original_value, TRUE),
+-            'override' => var_export($override_value, TRUE),
+-          ];
++          // Always hide values
++          $overrides[$name][$key] = NULL;
+         }
+         else {
+           $overrides[$name][$key] = NULL;

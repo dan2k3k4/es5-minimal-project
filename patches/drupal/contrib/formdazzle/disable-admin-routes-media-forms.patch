@@ -1,0 +1,17 @@
+diff --git a/formdazzle.module b/formdazzle.module
+index f4b17ee5e332..953fe9282c9d 100644
+--- a/formdazzle.module
++++ b/formdazzle.module
+@@ -12,7 +12,11 @@ use Drupal\Core\Render\Element;
+  * Implements hook_form_alter().
+  */
+ function formdazzle_form_alter(&$form, FormStateInterface $form_state, $form_id) {
+-  formdazzle_add_form_element_suggestions($form, $form_id);
++  /** @var \Drupal\Core\Routing\AdminContext $admin_context */
++  $admin_context = \Drupal::service('router.admin_context');
++  if (!$admin_context->isAdminRoute() && strpos($form_id, 'media_library') === FALSE) {
++    formdazzle_add_form_element_suggestions($form, $form_id);
++  }
+ }
+ 
+ /**

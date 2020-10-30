@@ -1,0 +1,103 @@
+diff --git a/ip2country.services.yml b/ip2country.services.yml
+index 2e46b89..bc6295d 100644
+--- a/ip2country.services.yml
++++ b/ip2country.services.yml
+@@ -1,10 +1,14 @@
+ services:
++  logger.channel.ip2country:
++    class: Drupal\Core\Logger\LoggerChannel
++    factory: logger.factory:get
++    arguments: ['ip2country']
+   ip2country.lookup:
+     class: Drupal\ip2country\Ip2CountryLookup
+     arguments: ['@request_stack', '@database']
+   ip2country.manager:
+     class: Drupal\ip2country\Ip2CountryManager
+-    arguments: ['@database', '@logger.factory']
++    arguments: ['@database', '@logger.channel.ip2country']
+ 
+   cache_context.ip.country:
+     class: Drupal\ip2country\Cache\Context\Ip2CountryCacheContext
+diff --git a/src/Ip2CountryManager.php b/src/Ip2CountryManager.php
+index f52a9b9..3d673fb 100644
+--- a/src/Ip2CountryManager.php
++++ b/src/Ip2CountryManager.php
+@@ -3,7 +3,7 @@
+ namespace Drupal\ip2country;
+ 
+ use Drupal\Core\Database\Connection;
+-use Drupal\Core\Logger\LoggerChannelFactoryInterface;
++use Psr\Log\LoggerInterface;
+ 
+ /**
+  * The ip2country.manager service.
+@@ -18,9 +18,9 @@ class Ip2CountryManager implements Ip2CountryManagerInterface {
+   protected $connection;
+ 
+   /**
+-   * The logger.factory service.
++   * The logger service.
+    *
+-   * @var \Drupal\Core\Logger\LoggerChannelFactoryInterface
++   * @var \Psr\Log\LoggerInterface
+    */
+   protected $logger;
+ 
+@@ -29,10 +29,10 @@ class Ip2CountryManager implements Ip2CountryManagerInterface {
+    *
+    * @param \Drupal\Core\Database\Connection $connection
+    *   The database connection.
+-   * @param \Drupal\Core\Logger\LoggerChannelFactoryInterface $logger
++   * @param \Psr\Log\LoggerInterface $logger
+    *   The logger.factory service.
+    */
+-  public function __construct(Connection $connection, LoggerChannelFactoryInterface $logger) {
++  public function __construct(Connection $connection, LoggerInterface $logger) {
+     $this->connection = $connection;
+     $this->logger = $logger;
+   }
+@@ -111,7 +111,7 @@ class Ip2CountryManager implements Ip2CountryManagerInterface {
+       $txt = $this->fetchPage($ftp_file);
+       if ($txt == FALSE) {
+         // Fetch failed.
+-        $this->logger('ip2country')->warning('File empty or not found on @registry server: @ftp_file', ['@registry' => mb_strtoupper($registry), '@ftp_file' => $ftp_file]);
++        $this->logger->warning('File empty or not found on @registry server: @ftp_file', ['@registry' => mb_strtoupper($registry), '@ftp_file' => $ftp_file]);
+         return FALSE;
+       }
+ 
+@@ -120,7 +120,7 @@ class Ip2CountryManager implements Ip2CountryManagerInterface {
+         $md5 = $this->fetchPage($ftp_file . '.md5');
+         if ($md5 == FALSE) {
+           // Fetch failed.
+-          $this->logger('ip2country')->warning('File not found on @registry server: @ftp_file.md5', ['@registry' => mb_strtoupper($registry), '@ftp_file' => $ftp_file]);
++          $this->logger->warning('File not found on @registry server: @ftp_file.md5', ['@registry' => mb_strtoupper($registry), '@ftp_file' => $ftp_file]);
+           return FALSE;
+         }
+ 
+@@ -135,7 +135,7 @@ class Ip2CountryManager implements Ip2CountryManagerInterface {
+           // Checksums don't agree, so drop temporary table,
+           // add watchdog entry, then return error.
+           $this->connection->schema()->dropTable('ip2country_temp');
+-          $this->logger('ip2country')->warning('Validation of database from @registry server FAILED. MD5 checksum provided for the @ftp_file registry database does not match the calculated checksum.', ['@registry' => mb_strtoupper($registry), '@ftp_file' => $ftp_file]);
++          $this->logger->warning('Validation of database from @registry server FAILED. MD5 checksum provided for the @ftp_file registry database does not match the calculated checksum.', ['@registry' => mb_strtoupper($registry), '@ftp_file' => $ftp_file]);
+           return FALSE;
+         }
+       }
+@@ -225,7 +225,7 @@ class Ip2CountryManager implements Ip2CountryManagerInterface {
+         // attempt.
+         $txn->rollBack();
+         $this->connection->schema()->dropTable('ip2country_temp');
+-        $this->logger('ip2country')->info('Exception in transaction while swapping in new DB table.', ['exception', $e]);
++        $this->logger->info('Exception in transaction while swapping in new DB table.', ['exception', $e]);
+         return FALSE;
+       }
+       // Commit transaction.
+@@ -242,7 +242,7 @@ class Ip2CountryManager implements Ip2CountryManagerInterface {
+       // Validation failed, so drop temporary table, add watchdog entry,
+       // then return error.
+       $this->connection->schema()->dropTable('ip2country_temp');
+-      $this->logger('ip2country')->warning('Validation of database from @registry server FAILED. Server summary reported @summary rows available, but @entries rows were entered into the database.', [
++      $this->logger->warning('Validation of database from @registry server FAILED. Server summary reported @summary rows available, but @entries rows were entered into the database.', [
+         '@registry' => mb_strtoupper($registry),
+         '@summary' => $summary_records,
+         '@entries' => $entries,

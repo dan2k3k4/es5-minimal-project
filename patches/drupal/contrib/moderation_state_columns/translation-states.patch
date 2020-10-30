@@ -1,0 +1,48 @@
+diff --git a/moderation_state_columns.module b/moderation_state_columns.module
+index ed86ab3566c5..57c3b3242e23 100644
+--- a/moderation_state_columns.module
++++ b/moderation_state_columns.module
+@@ -6,6 +6,7 @@
+  */
+ 
+ use Drupal\Core\Entity\EntityInterface;
++use Drupal\Core\Entity\TranslatableInterface;
+ use Drupal\Core\Routing\RouteMatchInterface;
+ use Drupal\moderation_state_columns\Plugin\views\style\ModerationStateColumns;
+ use Drupal\views\ResultRow;
+@@ -45,6 +46,7 @@ function template_preprocess_views_view_moderation_state_columns(&$variables) {
+ 
+   foreach ($variables['rows'] as $row) {
+     $entity = NULL;
++    $langCode = NULL;
+     foreach ($row as $item) {
+       if ($item instanceof EntityInterface && $moderationInformation->isModeratedEntity($item)) {
+         $entity = $item;
+@@ -52,6 +54,10 @@ function template_preprocess_views_view_moderation_state_columns(&$variables) {
+       elseif ($item instanceof ResultRow) {
+         if ($item->_entity instanceof EntityInterface && $moderationInformation->isModeratedEntity($item->_entity)) {
+           $entity = $item->_entity;
++          // @todo make it generic for other entity types
++          if ($entity instanceof TranslatableInterface && property_exists($item, 'node_field_revision_langcode')) {
++            $langCode = $item->node_field_revision_langcode;
++          }
+         }
+       }
+     }
+@@ -60,10 +66,15 @@ function template_preprocess_views_view_moderation_state_columns(&$variables) {
+       continue;
+     }
+     $entityWorkflow = $moderationInformation->getWorkflowForEntity($entity);
+-    if (!$entityWorkflow || $entityWorkflow->id() != $workflow->id()) {
++    if (!$entityWorkflow || $entityWorkflow->id() !== $workflow->id()) {
+       // The entity is not managed by the chosen workflow.
+       continue;
+     }
++    if ($langCode && $entity instanceof TranslatableInterface) {
++      if ($entity->hasTranslation($langCode)) {
++        $entity = $entity->getTranslation($langCode);
++      }
++    }
+     $state = $entity->get('moderation_state')->value;
+     if (!array_key_exists($state, $states)) {
+       // This state is hidden.
