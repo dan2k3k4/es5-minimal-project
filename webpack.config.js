@@ -6,6 +6,7 @@ module.exports = {
   entry: {
     scripts: './scripts.ts',
   },
+  target: ['web', 'es5'],
   output: {
     filename: '[name].js',
     path: path.resolve(__dirname, 'dist'),
@@ -16,7 +17,7 @@ module.exports = {
     rules: [
       {
         test: /\.(ts|js)$/,
-        exclude: /node_modules/,
+        exclude: /node_modules\/(?!(twig|twig-drupal-filters|lit-html|lit-element)\/).*/,
         use: [
           {
             loader: 'babel-loader',
